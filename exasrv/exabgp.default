@@ -1,0 +1,15 @@
+USER=root
+
+if [ -z "$ETC" ]
+then
+    ETC=/etc/exabgp
+fi
+
+if [ "$1" = "start" -o "$UPSTART_STATE" = "start" ]
+then
+    if [ -s "$ETC/processes/exasrv.conf" -a -x "$ETC/processes/exasrv.py" ]
+    then
+        rm -f "$ETC/exabgp.conf" "$ETC/exabgp.env"
+        "$ETC/processes/exasrv.py" "$ETC/processes/exasrv.conf" configure "$ETC/exabgp.conf"
+    fi
+fi
