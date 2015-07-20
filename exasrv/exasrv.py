@@ -62,7 +62,7 @@ def set_address(address, interface, noarp = False):
                 if (matcher.group('address') == address):
                     subprocess.call(str('ip addr delete %s dev %s' % (address, interface)).split())
                     log('[ip] removed address %s/%s from interface %s' % (address, matcher.group('netmask'), interface))
-        subprocess.call(str('ip addr add %s/%s dev %s' % (address, netmask, interface)).split())
+        subprocess.call(str('ip addr add %s/%s broadcast + dev %s' % (address, netmask, interface)).split())
         subprocess.call(str('ip link set %s up' % interface).split())
         log('[ip] added address %s/%s to interface %s' % (address, netmask, interface))
         if noarp:
