@@ -51,25 +51,34 @@ def set_address(address, interface, noarp = False):
     matcher = re.match(r'(?P<address>\d[\da-f.:]+)/(?P<netmask>\d+)', address)
     if not matcher:
         return
-    address = matcher.group('address')
-    netmask = matcher.group('netmask')
+    address    = matcher.group('address')
+    netmask    = matcher.group('netmask')
+    rinterface = re.sub(r'^(vlan\d+)@.+$', r'\1', interface)
     try:
-        for line in subprocess.check_output(str('ip addr show %s' % interface).split(), shell=False).split('\n'):
-            matcher = re.match(r'^\s*inet6?\s+(?P<address>\d[\da-f.:]+)/(?P<netmask>\d+)\s+', line)
-            if matcher:
-                if (matcher.group('address') + '/' + matcher.group('netmask')) == (address + '/' + netmask):
-                    return
-                if (matcher.group('address') == address):
-                    subprocess.call(str('ip addr delete %s dev %s' % (address, interface)).split())
-                    log('[ip] removed address %s/%s from interface %s' % (address, matcher.group('netmask'), interface))
-        subprocess.call(str('ip addr add %s/%s broadcast + dev %s' % (address, netmask, interface)).split())
-        subprocess.call(str('ip link set %s up' % interface).split())
-        log('[ip] added address %s/%s to interface %s' % (address, netmask, interface))
-        if noarp:
-            subprocess.call(str('sysctl -q -w net/ipv4/conf/%s/arp_ignore=1' % interface).split())
-            subprocess.call(str('sysctl -q -w net/ipv4/conf/%s/arp_announce=2' % interface).split())
+       for line in subprocess.check_output(str('ip addr show %s' % rinterface).split(), shell=False).split('\n'):
+           matcher = re.match(r'^\s*inet6?\s+(?P<address>\d[\da-f.:]+)/(?P<netmask>\d+)\s+', line)
+           if matcher:
+               if (matcher.group('address') + '/' + matcher.group('netmask')) == (address + '/' + netmask):
+                   return
+               if (matcher.group('address') == address):
+                   subprocess.call(str('ip addr delete %s dev %s' % (address, rinterface)).split())
+                   log('[ip] removed address %s/%s from interface %s' % (address, matcher.group('netmask'), rinterface))
     except:
         pass
+
+    matcher = re.match(r'^(?P<interface>[^\.]+?)\.(?P<vlan>\d+)$', interface)
+    if matcher:
+        subprocess.call(str('ip link add link %s name %s type vlan id %s' % (matcher.group('interface'), interface, matcher.group('vlan'))).split())
+    matcher = re.match(r'^vlan(?P<vlan>\d+)@(?P<interface>.+)$', interface)
+    if matcher:
+        subprocess.call(str('ip link add link %s name vlan%s type vlan id %s' % (matcher.group('interface'), matcher.group('vlan'), matcher.group('vlan'))).split())
+
+    subprocess.call(str('ip link set %s up' % rinterface).split())
+    subprocess.call(str('ip addr add %s/%s broadcast + dev %s' % (address, netmask, rinterface)).split())
+    log('[ip] added address %s/%s to interface %s' % (address, netmask, rinterface))
+    if noarp:
+        subprocess.call(str('sysctl -q -w net/ipv4/conf/%s/arp_ignore=1' % rinterface).split())
+        subprocess.call(str('sysctl -q -w net/ipv4/conf/%s/arp_announce=2' % rinterface).split())
 
 # set local route
 def set_route(prefix, nexthop, options = {}, remove = False):
@@ -303,7 +312,7 @@ elif sys.argv[2] == 'supervise':
                    set_address(address, str(peer.get('local', {}).get('interface', 'lo')))
             if service:
                for address in service.get('addresses', {}):
-                   set_address('%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address), 'lo')
+                   set_address('%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address), 'lo', True)
 
         # announce addresses based on service healthcheck
         if service and (now - service_last) >= (check_interval if service_state in ['up', 'down'] else check_finterval):
