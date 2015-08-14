@@ -299,7 +299,8 @@ elif sys.argv[2] == 'supervise':
             ip_last = now
             address = peer.get('local', {}).get('address', None)
             if address:
-                set_address(address, str(peer.get('local', {}).get('interface', 'lo')))
+                if peer.get('local', {}).get('auto', True):
+                   set_address(address, str(peer.get('local', {}).get('interface', 'lo')))
             if service:
                for address in service.get('addresses', {}):
                    set_address('%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address), 'lo')
