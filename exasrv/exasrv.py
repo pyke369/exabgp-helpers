@@ -382,8 +382,9 @@ elif sys.argv[2] == 'supervise':
             # announce or withdraw addresses based on service state
             if service_state in ['up','down'] or service_disabled:
                 for address, options in service.get('addresses', {}).items():
-                    address = '%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address)
-                    weight  = options.get('weight', 0)
+                    address  = '%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address)
+                    weight   = options.get('weight', 0)
+                    alwaysup = options.get('alwaysup', False)
                     if weight == 'primary':
                         weight = 100
                     elif weight == 'secondary':
@@ -393,7 +394,7 @@ elif sys.argv[2] == 'supervise':
                             weight = int(weight)
                         except:
                             weight = 0
-                    line   = 'neighbor %s %s route %s next-hop %s' % (name, 'announce' if service_state == 'up' and not service_disabled else 'withdraw', address, peer.get('local', {}).get('nexthop', 'self'))
+                    line   = 'neighbor %s %s route %s next-hop %s' % (name, 'announce' if (alwaysup or (service_state == 'up' and not service_disabled)) else 'withdraw', address, peer.get('local', {}).get('nexthop', 'self'))
                     if weight > 0:
                         line += ' med %d' % weight
                     community = str(options.get('community', ''))
