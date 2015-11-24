@@ -311,8 +311,8 @@ elif sys.argv[2] == 'supervise':
                 if peer.get('local', {}).get('auto', True):
                    set_address(address, str(peer.get('local', {}).get('interface', 'lo')))
             if service:
-               for address in service.get('addresses', {}):
-                   set_address('%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address), 'lo', True)
+               for address, options in service.get('addresses', {}).items():
+                   set_address('%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address), options.get('interface', 'lo'), True)
 
         # announce addresses based on service healthcheck
         if service and (now - service_last) >= (check_interval if service_state in ['up', 'down'] else check_finterval):
