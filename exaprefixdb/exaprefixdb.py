@@ -120,6 +120,7 @@ while True:
                     pass
 
             try:
+                os.umask(022)
                 handle = open(base, 'w')
                 handle.write("\n".join(sorted(prefixes.keys())) + "\n")
                 handle.close()
