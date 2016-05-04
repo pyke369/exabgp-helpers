@@ -2,7 +2,7 @@
 
 # mandatory imports
 from __future__ import print_function
-import sys, os, re, subprocess, time, select, fcntl, syslog
+import sys, os, re, subprocess, time, select, fcntl, signal, syslog
 try:
    import simplejson as json
 except ImportError:
@@ -120,9 +120,9 @@ def set_route(prefix, nexthop, options = {}, remove = False):
         if not info['nexthops'].get(nexthop, None):
             return
         if len(info['nexthops']) <= 1:
-            command = 'ip route delete %s %s' % (prefix, options)
+            command = 'ip route delete %s proto 42 %s' % (prefix, options)
         else:
-            command = 'ip route replace %s %s' % (prefix, options)
+            command = 'ip route replace %s proto 42 %s' % (prefix, options)
             for lnexthop, weight in info['nexthops'].items():
                 if lnexthop != nexthop:
                     command += ' nexthop via %s weight %d' % (lnexthop, weight)
@@ -131,13 +131,21 @@ def set_route(prefix, nexthop, options = {}, remove = False):
     else:
         if info and info['nexthops'].get(nexthop, None) and info['nexthops'].get(nexthop) == weight:
             return
-        command = 'ip route replace %s %s nexthop via %s weight %d' % (prefix, options, nexthop, weight)
+        command = 'ip route replace %s proto 42 %s nexthop via %s weight %d' % (prefix, options, nexthop, weight)
         if info:
             for lnexthop, weight in info['nexthops'].items():
                 if lnexthop != nexthop:
                     command += ' nexthop via %s weight %d' % (lnexthop, weight)
         subprocess.call(command.split())
         log("[ip] added nexthop %s to %s %s" % (nexthop, prefix, options))
+
+# remove all local routes under exasrv control
+def cleanup_exit(signal, frame):
+    for line in subprocess.check_output('ip route list scope global'.split(), shell=False).split('\n'):
+        if line.find('proto 42') >= 0 or line.find('proto exa') >= 0 :
+            command = 'ip route delete %s' % line
+            subprocess.call(command.split())
+    sys.exit(0)
 
 # generate ExaBGP configuration
 if sys.argv[2] == 'configure':
@@ -202,6 +210,7 @@ elif sys.argv[2] == 'supervise':
     service_disabled = False
     service_state    = 'down'
     routes           = {'announce':{}, 'withdraw':{}}
+    addresses        = {'announce':{}, 'withdraw':{}}
     fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL, fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETFL) | os.O_NONBLOCK)
     while True:
 
@@ -226,6 +235,8 @@ elif sys.argv[2] == 'supervise':
             action_up       = str(actions.get('up', ''))
             action_down     = str(actions.get('down', ''))
             action_disable  = str(actions.get('disable', ''))
+            addresses['announce'] = service.get('addresses', {})
+            addresses['withdraw'].update(addresses['announce'])
 
         # receive and interpret BGP announces/withdraws from BGP peers
         ready, _, _ = select.select([sys.stdin], [], [], 1)
@@ -279,6 +290,7 @@ elif sys.argv[2] == 'supervise':
                                 log('[bgp] %s %s metric %d via %s learned from peer %s' % (action[0], action[1], metric, action[2], name))
 
                     elif type == 'notification' and str(message.get('notification', '')) == 'shutdown':
+                        signal.signal(signal.SIGTERM, cleanup_exit)
                         routes_last = 0
                         for route in routes['announce']:
                             routes['withdraw'][route] = routes['announce'][route]
@@ -311,7 +323,7 @@ elif sys.argv[2] == 'supervise':
                 if peer.get('local', {}).get('auto', True):
                    set_address(address, str(peer.get('local', {}).get('interface', 'lo')))
             if service:
-               for address, options in service.get('addresses', {}).items():
+               for address, options in addresses['announce'].items():
                    set_address('%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address), options.get('interface', 'lo'), True)
 
         # announce addresses based on service healthcheck
@@ -381,7 +393,7 @@ elif sys.argv[2] == 'supervise':
 
             # announce or withdraw addresses based on service state
             if service_state in ['up','down'] or service_disabled:
-                for address, options in service.get('addresses', {}).items():
+                for address, options in addresses['announce'].items():
                     address  = '%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address)
                     weight   = options.get('weight', 0)
                     alwaysup = options.get('alwaysup', False)
@@ -394,7 +406,7 @@ elif sys.argv[2] == 'supervise':
                             weight = int(weight)
                         except:
                             weight = 0
-                    line   = 'neighbor %s %s route %s next-hop %s' % (name, 'announce' if (alwaysup or (service_state == 'up' and not service_disabled)) else 'withdraw', address, peer.get('local', {}).get('nexthop', 'self'))
+                    line = 'neighbor %s %s route %s next-hop %s' % (name, 'announce' if (alwaysup or (service_state == 'up' and not service_disabled)) else 'withdraw', address, peer.get('local', {}).get('nexthop', 'self'))
                     if weight > 0:
                         line += ' med %d' % weight
                     community = str(options.get('community', ''))
@@ -404,6 +416,11 @@ elif sys.argv[2] == 'supervise':
                     if aspath != '':
                         line += ' as-path [ %s ]' % aspath
                     print(line)
+                for address in addresses['withdraw'].iterkeys():
+                    if not address in addresses['announce']:
+                        address = '%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address)
+                        line    = 'neighbor %s withdraw route %s next-hop %s' % (name, address, peer.get('local', {}).get('nexthop', 'self'))
+                        print(line)
                 sys.stdout.flush()
 
 else:
