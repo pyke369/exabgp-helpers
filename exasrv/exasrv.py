@@ -39,6 +39,18 @@ def load_configuration():
             handle.close()
             content = re.sub(r'^\s*(#|//).+?$', '', content, flags = re.M)
             content = re.sub(r'/\*[^\*]*\*/', '', content)
+            while True:
+               matcher = re.match(r'(?P<before>^.*?)\{\{<\s*(?P<include>[^\}\s]+?)\s*\}\}(?P<after>.*)$', content, flags = re.S)
+               if not matcher:
+                   break
+               include = ''
+               try:
+                   handle  = open(matcher.group('include'), 'r')
+                   include = handle.read(65536)
+                   handle.close()
+               except:
+                   pass
+               content = matcher.group('before') + include + matcher.group('after')
             content = re.sub(r',(\s*[\}\]])', r'\1', content)
             conf    = json.loads(content)
             return True
@@ -142,7 +154,7 @@ def set_route(prefix, nexthop, options = {}, remove = False):
 # remove all local routes under exasrv control
 def cleanup_exit(signal, frame):
     for line in subprocess.check_output('ip route list scope global'.split(), shell=False).split('\n'):
-        if line.find('proto 42') >= 0 or line.find('proto exa') >= 0 :
+        if line.find('proto 42') >= 0 or line.find('proto exa') >= 0:
             command = 'ip route delete %s' % line
             subprocess.call(command.split())
     sys.exit(0)
@@ -235,7 +247,9 @@ elif sys.argv[2] == 'supervise':
             action_up       = str(actions.get('up', ''))
             action_down     = str(actions.get('down', ''))
             action_disable  = str(actions.get('disable', ''))
-            addresses['announce'] = service.get('addresses', {})
+            addresses['announce'] = {}
+            for address, options in service.get('addresses', {}).items():
+                addresses['announce'][address + ('' if re.search(r'/[0-9]+$', address) else '/32')] = options
             addresses['withdraw'].update(addresses['announce'])
 
         # receive and interpret BGP announces/withdraws from BGP peers
@@ -324,7 +338,7 @@ elif sys.argv[2] == 'supervise':
                    set_address(address, str(peer.get('local', {}).get('interface', 'lo')))
             if service:
                for address, options in addresses['announce'].items():
-                   set_address('%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address), options.get('interface', 'lo'), True)
+                   set_address(address, options.get('interface', 'lo'), True)
 
         # announce addresses based on service healthcheck
         if service and (now - service_last) >= (check_interval if service_state in ['up', 'down'] else check_finterval):
@@ -394,7 +408,6 @@ elif sys.argv[2] == 'supervise':
             # announce or withdraw addresses based on service state
             if service_state in ['up','down'] or service_disabled:
                 for address, options in addresses['announce'].items():
-                    address  = '%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address)
                     weight   = options.get('weight', 0)
                     alwaysup = options.get('alwaysup', False)
                     if weight == 'primary':
@@ -418,8 +431,7 @@ elif sys.argv[2] == 'supervise':
                     print(line)
                 for address in addresses['withdraw'].iterkeys():
                     if not address in addresses['announce']:
-                        address = '%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address)
-                        line    = 'neighbor %s withdraw route %s next-hop %s' % (name, address, peer.get('local', {}).get('nexthop', 'self'))
+                        line = 'neighbor %s withdraw route %s next-hop %s' % (name, address, peer.get('local', {}).get('nexthop', 'self'))
                         print(line)
                 sys.stdout.flush()
 
