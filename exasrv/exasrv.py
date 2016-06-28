@@ -235,7 +235,13 @@ elif sys.argv[2] == 'supervise':
             action_up       = str(actions.get('up', ''))
             action_down     = str(actions.get('down', ''))
             action_disable  = str(actions.get('disable', ''))
-            addresses['announce'] = service.get('addresses', {})
+            addresses['announce'] = {}
+
+            for ip, info in service.get('addresses', {}).iteritems():
+                 if re.search(r'/[0-9]+$', ip):
+                      addresses['announce'][ip]=info
+                 else:
+                      addresses['announce']["%s/32" % ip]=info
             addresses['withdraw'].update(addresses['announce'])
 
         # receive and interpret BGP announces/withdraws from BGP peers
@@ -324,7 +330,7 @@ elif sys.argv[2] == 'supervise':
                    set_address(address, str(peer.get('local', {}).get('interface', 'lo')))
             if service:
                for address, options in addresses['announce'].items():
-                   set_address('%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address), options.get('interface', 'lo'), True)
+                   set_address(address, options.get('interface', 'lo'), True)
 
         # announce addresses based on service healthcheck
         if service and (now - service_last) >= (check_interval if service_state in ['up', 'down'] else check_finterval):
@@ -394,7 +400,6 @@ elif sys.argv[2] == 'supervise':
             # announce or withdraw addresses based on service state
             if service_state in ['up','down'] or service_disabled:
                 for address, options in addresses['announce'].items():
-                    address  = '%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address)
                     weight   = options.get('weight', 0)
                     alwaysup = options.get('alwaysup', False)
                     if weight == 'primary':
@@ -418,7 +423,6 @@ elif sys.argv[2] == 'supervise':
                     print(line)
                 for address in addresses['withdraw'].iterkeys():
                     if not address in addresses['announce']:
-                        address = '%s/32' % re.sub(r'^(.+?)(/\d+)?$', r'\1', address)
                         line    = 'neighbor %s withdraw route %s next-hop %s' % (name, address, peer.get('local', {}).get('nexthop', 'self'))
                         print(line)
                 sys.stdout.flush()
