@@ -132,9 +132,9 @@ def set_route(prefix, nexthop, options = {}, remove = False):
         if not info['nexthops'].get(nexthop, None):
             return
         if len(info['nexthops']) <= 1:
-            command = 'ip route delete %s proto 42 %s' % (prefix, options)
+            command = 'ip route delete %s proto 57 %s' % (prefix, options)
         else:
-            command = 'ip route replace %s proto 42 %s' % (prefix, options)
+            command = 'ip route replace %s proto 57 %s' % (prefix, options)
             for lnexthop, weight in info['nexthops'].items():
                 if lnexthop != nexthop:
                     command += ' nexthop via %s weight %d' % (lnexthop, weight)
@@ -143,7 +143,7 @@ def set_route(prefix, nexthop, options = {}, remove = False):
     else:
         if info and info['nexthops'].get(nexthop, None) and info['nexthops'].get(nexthop) == weight:
             return
-        command = 'ip route replace %s proto 42 %s nexthop via %s weight %d' % (prefix, options, nexthop, weight)
+        command = 'ip route replace %s proto 57 %s nexthop via %s weight %d' % (prefix, options, nexthop, weight)
         if info:
             for lnexthop, weight in info['nexthops'].items():
                 if lnexthop != nexthop:
@@ -154,7 +154,7 @@ def set_route(prefix, nexthop, options = {}, remove = False):
 # remove all local routes under exasrv control
 def cleanup_exit(signal, frame):
     for line in subprocess.check_output('ip route list scope global'.split(), shell=False).split('\n'):
-        if line.find('proto 42') >= 0 or line.find('proto exa') >= 0:
+        if line.find('proto 57') >= 0 or line.find('proto exa') >= 0:
             command = 'ip route delete %s' % line
             subprocess.call(command.split())
     sys.exit(0)
