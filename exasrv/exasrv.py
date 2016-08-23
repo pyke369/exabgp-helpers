@@ -281,7 +281,9 @@ elif sys.argv[2] == 'supervise':
                                             for key3, value3 in value2.items():
                                                 if key1 == 'announce':
                                                     for value4 in value3:
-                                                        actions.append([key1, value4, key3])
+                                                        #if End-Of-Rib message then ignore:
+                                                        if value4 != 'eor':
+                                                            actions.append([key1, value4, key3])
                                                 else:
                                                     actions.append([key1, key3, name])
                                 elif key1 == 'attribute':
