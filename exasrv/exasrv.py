@@ -93,10 +93,10 @@ def set_address(address, interface, noarp = False):
         subprocess.call(str('sysctl -q -w net/ipv4/conf/%s/arp_announce=2' % rinterface).split())
 
 # set local route
-def set_route(prefix, nexthop, options = {}, remove = False):
+def set_route(prefix, nexthop, options = {}, remove = False, rt_table = 'main' ):
     rtable = {}
     rkey   = None
-    for line in subprocess.check_output('ip route list scope global'.split(), shell=False).split('\n'):
+    for line in subprocess.check_output(('ip route list scope global table %s' % rt_table).split(), shell=False).split('\n'):
         matcher = re.match(r'^(?P<prefix>\S+)(?:\s+via\s+(?P<gateway>\S+))?(?:\s*(?P<options>.+?)\s*)?$', line)
         if matcher:
             lprefix  = matcher.group('prefix') if matcher.group('prefix') != 'default' else '0.0.0.0/0'
@@ -132,28 +132,28 @@ def set_route(prefix, nexthop, options = {}, remove = False):
         if not info['nexthops'].get(nexthop, None):
             return
         if len(info['nexthops']) <= 1:
-            command = 'ip route delete %s proto 57 %s' % (prefix, options)
+            command = 'ip route delete %s proto 57 table %s %s ' % (prefix, rt_table, options)
         else:
-            command = 'ip route replace %s proto 57 %s' % (prefix, options)
+            command = 'ip route replace %s proto 57 table %s %s ' % (prefix, rt_table, options)
             for lnexthop, weight in info['nexthops'].items():
                 if lnexthop != nexthop:
                     command += ' nexthop via %s weight %d' % (lnexthop, weight)
         subprocess.call(command.split())
-        log("[ip] removed nexthop %s from %s %s" % (nexthop, prefix, options))
+        log("[ip] removed nexthop %s from %s %s table %s" % (nexthop, prefix, options, rt_table))
     else:
         if info and info['nexthops'].get(nexthop, None) and info['nexthops'].get(nexthop) == weight:
             return
-        command = 'ip route replace %s proto 57 %s nexthop via %s weight %d' % (prefix, options, nexthop, weight)
+        command = 'ip route replace %s proto 57 table %s %s nexthop via %s weight %d' % (prefix, rt_table, options, nexthop, weight)
         if info:
             for lnexthop, weight in info['nexthops'].items():
                 if lnexthop != nexthop:
                     command += ' nexthop via %s weight %d' % (lnexthop, weight)
         subprocess.call(command.split())
-        log("[ip] added nexthop %s to %s %s" % (nexthop, prefix, options))
+        log("[ip] added nexthop %s to %s %s table %s" % (nexthop, prefix, options, rt_table))
 
 # remove all local routes under exasrv control
 def cleanup_exit(signal, frame):
-    for line in subprocess.check_output('ip route list scope global'.split(), shell=False).split('\n'):
+    for line in subprocess.check_output(('ip route list scope global table %s' % rt_table).split(), shell=False).split('\n'):
         if line.find('proto 57') >= 0 or line.find('proto exa') >= 0:
             command = 'ip route delete %s' % line
             subprocess.call(command.split())
@@ -236,6 +236,7 @@ elif sys.argv[2] == 'supervise':
             if not peer:
                 abort('peer "%s" not found in configuration - aborting' % name)
             service         = group.get('service', {})
+            rt_table        = str(group.get('route_table', 'main'))
             service_disable = str(service.get('disable', ''))
             check           = service.get('check', {})
             check_command   = str(check.get('command', ''))
@@ -332,7 +333,7 @@ elif sys.argv[2] == 'supervise':
                     if (bool(options.get('ignore', False))):
                         continue
                     options.pop('ignore', None)
-                    set_route(prefix, routes[action][route][0], options, action == 'withdraw')
+                    set_route(prefix, routes[action][route][0], options, action == 'withdraw', rt_table)
 
         # ensure needed local adresses are properly configured
         if now - ip_last >= 5:
