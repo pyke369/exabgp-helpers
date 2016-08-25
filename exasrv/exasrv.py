@@ -223,6 +223,7 @@ elif sys.argv[2] == 'supervise':
     service_state    = 'down'
     routes           = {'announce':{}, 'withdraw':{}}
     addresses        = {'announce':{}, 'withdraw':{}}
+    nh_history       = {}
     fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL, fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETFL) | os.O_NONBLOCK)
     while True:
 
@@ -283,9 +284,11 @@ elif sys.argv[2] == 'supervise':
                                                     for value4 in value3:
                                                         #if End-Of-Rib message then ignore:
                                                         if value4 != 'eor':
+                                                            nh_history[value4, name] = key3
                                                             actions.append([key1, value4, key3])
                                                 else:
-                                                    actions.append([key1, key3, name])
+                                                    actions.append([key1, key3, nh_history[key3, name]])
+                                                    del nh_history[key3, name]
                                 elif key1 == 'attribute':
                                     for key2, value2 in value1.items():
                                         if key2 == 'med':
