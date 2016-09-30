@@ -2,7 +2,8 @@
 
 # mandatory imports
 from __future__ import print_function
-import sys, os, re, subprocess, time, select, fcntl, signal, syslog
+from retrying import retry
+import ipaddress, sys, os, re, subprocess, time, select, fcntl, random, signal, syslog, zc.lockfile
 try:
    import simplejson as json
 except ImportError:
@@ -58,24 +59,53 @@ def load_configuration():
             log('[conf] invalid configuration file "%s"' % conf_path)
     return False
 
+# configure ip rule for ip address
+def rule_config(address, netmask, ipvers, table):
+    validrule = 0
+    for line in subprocess.check_output(str('ip -f %s rule show' % (ipvers.get('inet'))).split(), shell=False).split('\n'):
+        matcher = re.match(r'^[\d]+:\s+from\s+(?P<address>\d[\da-f.:]+)/?(?P<netmask>\d+)?\s+lookup\s+(?P<table>[\da-z]+)\s*$', line)
+        if matcher:
+            if (matcher.group('address') == address and (matcher.group('netmask') if (matcher.group('netmask') != None) else '32' if (ipvers.get('ver') == 4) else '128' ) == netmask and matcher.group('table') == table):
+                validrule += 1
+            elif (matcher.group('address') == address and (matcher.group('netmask') if (matcher.group('netmask') != None) else '32' if (ipvers.get('ver') == 4) else '128' ) == netmask):
+                log ("[ip] [%s] traffic from %s/%s removed from table %s"%(peer.get('remote', {}).get('address', None), matcher.group('address'), matcher.group('netmask') if (matcher.group('netmask') != None) else '32' if (ipvers.get('ver') == 4) else '128', matcher.group('table')))
+                subprocess.call(str("ip -f %s rule del from %s/%s table %s "% (ipvers.get('inet'), matcher.group('address'), matcher.group('netmask') if (matcher.group('netmask') != None) else '32' if (ipvers.get('ver') == 4) else '128', matcher.group('table'))).split())
+    if ( validrule > 1 ):
+       for _ in range(validrule-1):
+            log ("[ip] [%s] traffic from %s/%s remove from table %s"%(peer.get('remote', {}).get('address', None),address, netmask, table))
+            subprocess.call(str("ip -f %s rule del from %s/%s table %s "% (ipvers.get('inet'), address, netmask, table)).split())
+
+    if (table != 'main' and validrule == 0):
+        log ("[ip] [%s] traffic from %s/%s directed to table %s"%(peer.get('remote', {}).get('address', None), address, netmask, table))
+        subprocess.call(str("ip -f %s rule add from %s/%s table %s"% (ipvers.get('inet'), address, netmask, table)).split())
+
 # set local address
-def set_address(address, interface, noarp = False):
+@retry(wait_fixed=2000,stop_max_attempt_number=5)
+def set_address(address, interface, ipvers, noarp = False, table = 'main'):
     matcher = re.match(r'(?P<address>\d[\da-f.:]+)/(?P<netmask>\d+)', address)
     if not matcher:
         return
     address    = matcher.group('address')
     netmask    = matcher.group('netmask')
+    if (ipaddress.ip_address(unicode(str(address),"utf-8")).version != ipvers.get('ver')):
+       return
+
+    # set lock so other processes will pass
+    lock = zc.lockfile.LockFile('lock%s'%ipvers.get('ver'))
     rinterface = re.sub(r'^(vlan\d+)@.+$', r'\1', interface)
     try:
-       for line in subprocess.check_output(str('ip addr show %s' % rinterface).split(), shell=False).split('\n'):
+       for line in subprocess.check_output(str('ip -f %s addr show %s' % (ipvers.get('inet'), rinterface)).split(), shell=False).split('\n'):
            matcher = re.match(r'^\s*inet6?\s+(?P<address>\d[\da-f.:]+)/(?P<netmask>\d+)\s+', line)
            if matcher:
                if (matcher.group('address') + '/' + matcher.group('netmask')) == (address + '/' + netmask):
-                   return
+                 rule_config (address, netmask, ipvers, table)
+                 lock.close()
+                 return
                if (matcher.group('address') == address):
                    subprocess.call(str('ip addr delete %s dev %s' % (address, rinterface)).split())
                    log('[ip] removed address %s/%s from interface %s' % (address, matcher.group('netmask'), rinterface))
     except:
+        log ("ip detection of address %s/%s on interface %s failed"% (address, netmask, rinterface))
         pass
 
     matcher = re.match(r'^(?P<interface>[^\.]+?)\.(?P<vlan>\d+)$', interface)
@@ -86,20 +116,29 @@ def set_address(address, interface, noarp = False):
         subprocess.call(str('ip link add link %s name vlan%s type vlan id %s' % (matcher.group('interface'), matcher.group('vlan'), matcher.group('vlan'))).split())
 
     subprocess.call(str('ip link set %s up' % rinterface).split())
-    subprocess.call(str('ip addr add %s/%s broadcast + dev %s' % (address, netmask, rinterface)).split())
+
+    subprocess.call(str('ip addr add %s/%s %sdev %s' % (address, netmask, '' if (ipvers.get('inet') == 'inet6') else 'broadcast + ',rinterface)).split())
     log('[ip] added address %s/%s to interface %s' % (address, netmask, rinterface))
+
+    rule_config (address, netmask, ipvers, table)
     if noarp:
         subprocess.call(str('sysctl -q -w net/ipv4/conf/%s/arp_ignore=1' % rinterface).split())
         subprocess.call(str('sysctl -q -w net/ipv4/conf/%s/arp_announce=2' % rinterface).split())
+### ipv6 section to test
+        #subprocess.call(str('sysctl -q -w net/ipv6/conf/%s/accept_ra=0' % rinterface).split())
+    lock.close()
 
 # set local route
-def set_route(prefix, nexthop, options = {}, remove = False, rt_table = 'main' ):
+def set_route(prefix, nexthop, options = {}, remove = False, rt_table = 'main', ipvers = {'inet':'inet', 'ver':4} ):
     rtable = {}
     rkey   = None
-    for line in subprocess.check_output(('ip route list scope global table %s' % rt_table).split(), shell=False).split('\n'):
+    for line in subprocess.check_output(('ip -f %s route list scope global table %s' % (ipvers.get('inet'), rt_table)).split(), shell=False).split('\n'):
         matcher = re.match(r'^(?P<prefix>\S+)(?:\s+via\s+(?P<gateway>\S+))?(?:\s*(?P<options>.+?)\s*)?$', line)
         if matcher:
-            lprefix  = matcher.group('prefix') if matcher.group('prefix') != 'default' else '0.0.0.0/0'
+            if (ipvers.get('inet') == 'inet'):
+               lprefix  = matcher.group('prefix') if matcher.group('prefix') != 'default' else '0.0.0.0/0'
+            else:
+               lprefix  = matcher.group('prefix') if matcher.group('prefix') != 'default' else '::/0'
             lgateway = matcher.group('gateway')
             loptions = matcher.group('options').split()
             loptions = dict(zip(loptions[::2], loptions[1::2]))
@@ -155,9 +194,22 @@ def set_route(prefix, nexthop, options = {}, remove = False, rt_table = 'main' )
 def cleanup_exit(signal, frame):
     for line in subprocess.check_output(('ip route list scope global table %s' % rt_table).split(), shell=False).split('\n'):
         if line.find('proto 57') >= 0 or line.find('proto exa') >= 0:
-            command = 'ip route delete %s' % line
+            command = 'ip route delete %s table %s' % (line, rt_table)
+            subprocess.call(command.split())
+    for line in subprocess.check_output(('ip -f inet6 route list scope global table %s' % rt_table).split(), shell=False).split('\n'):
+        if line.find('proto 57') >= 0 or line.find('proto exa') >= 0:
+            command = 'ip -f inet6 route delete %s table %s' % (line, rt_table)
             subprocess.call(command.split())
     sys.exit(0)
+
+# check if route table exists
+def rt_exist (rt_table = 'main'):
+   try:
+      subprocess.check_output(str('ip route show table %s'%rt_table).split(), shell=False, stderr=subprocess.STDOUT).split('\n')
+   except:
+      log("[ip] table %s don't exists, exit from proccess"%rt_table)
+      sys.exit(0)
+   #return exist
 
 # generate ExaBGP configuration
 if sys.argv[2] == 'configure':
@@ -173,9 +225,11 @@ if sys.argv[2] == 'configure':
                         '  local-address %s;\n'
                         '  local-as %s;\n'
                         '  peer-as %s;\n'
+                        '  capability {\n'
+                        '    route-refresh enable;\n'
+                        '  }\n'
                         '  family {\n'
-                        '    ipv4 unicast;\n'
-                        '    ipv6 unicast;\n'
+                        '    ipv%s  unicast;\n'
                         '  }\n'
                         '  process supervise%d {\n'
                         '    encoder json;\n'
@@ -187,11 +241,11 @@ if sys.argv[2] == 'configure':
                         '}\n') %\
                         (
                             name,
-                            re.sub(r'^(.+?)(/\d+)$', r'\1',
-                            str(local.get('address', '0.0.0.0'))),
+                            re.sub(r'^(.+?)(/\d+)$', r'\1', str(local.get('routerid', '0.0.0.0'))),
                             re.sub(r'^(.+?)(/\d+)$', r'\1', str(local.get('address', '0.0.0.0'))),
                             str(local.get('asnum', '0')),
                             str(remote.get('asnum', '0')),
+                            str(ipaddress.ip_address(unicode(str(remote.get('address', '0')),"utf-8")).version),
                             supervise,
                             self_path,
                             conf_path,
@@ -224,6 +278,8 @@ elif sys.argv[2] == 'supervise':
     routes           = {'announce':{}, 'withdraw':{}}
     addresses        = {'announce':{}, 'withdraw':{}}
     nh_history       = {}
+    ipvers           = {'inet':'', 'ver':0}
+    addresses_hist   = {}
     fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL, fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETFL) | os.O_NONBLOCK)
     while True:
 
@@ -251,8 +307,14 @@ elif sys.argv[2] == 'supervise':
             action_disable  = str(actions.get('disable', ''))
             addresses['announce'] = {}
             for address, options in service.get('addresses', {}).items():
-                addresses['announce'][address + ('' if re.search(r'/[0-9]+$', address) else '/32')] = options
+                if ( ipaddress.ip_address(unicode(str(re.sub(r'^(.+?)/\d+$', r'\1', address)),"utf-8")).version == 6 ):
+                   addresses['announce'][address + ('' if re.search(r'/[0-9]+$', address) else '/128')] = options
+                else:
+                   addresses['announce'][address + ('' if re.search(r'/[0-9]+$', address) else '/32')] = options
             addresses['withdraw'].update(addresses['announce'])
+
+        # check if route table exists and exit if not
+        rt_exist(rt_table)
 
         # receive and interpret BGP announces/withdraws from BGP peers
         ready, _, _ = select.select([sys.stdin], [], [], 1)
@@ -261,11 +323,18 @@ elif sys.argv[2] == 'supervise':
                 try:
                     line = sys.stdin.readline().strip()
                     message  = json.loads(line)
+                    try:
+                      if (ipaddress.ip_address(unicode(str(message.get('neighbor', {}).get('ip', '')),"utf-8")).version == 6):
+                         ipvers = {'inet':'inet6', 'ver':6}
+                      elif (ipaddress.ip_address(unicode(str(message.get('neighbor', {}).get('ip', '')),"utf-8")).version == 4):
+                         ipvers = {'inet':'inet', 'ver':4}
+                    except:
+                       pass
                     neighbor = message.get('neighbor', {})
                     type     = str(message.get('type', ''))
                     if str(neighbor.get('ip', '')) == name:
                         if type == 'state':
-                            log('[bgp] peer %s is %s' % (name, str(neighbor.get('state', 'up'))))
+                            log('[bgp] peer %s %s is %s' % (ipvers.get('inet','ERROR'), name, str(neighbor.get('state', 'up'))))
                             if str(neighbor.get('state', 'up')) == 'down':
                                 routes_last = 0
                                 for route in routes['announce']:
@@ -333,18 +402,18 @@ elif sys.argv[2] == 'supervise':
                     if (bool(options.get('ignore', False))):
                         continue
                     options.pop('ignore', None)
-                    set_route(prefix, routes[action][route][0], options, action == 'withdraw', rt_table)
+                    set_route(prefix, routes[action][route][0], options, action == 'withdraw', rt_table, ipvers)
 
         # ensure needed local adresses are properly configured
         if now - ip_last >= 5:
             ip_last = now
             address = peer.get('local', {}).get('address', None)
-            if address:
+            if (address and (ipvers.get('inet') != '')):
                 if peer.get('local', {}).get('auto', True):
-                   set_address(address, str(peer.get('local', {}).get('interface', 'lo')))
-            if service:
+                   set_address(address, str(peer.get('local', {}).get('interface', 'lo')), ipvers)
+            if (service and (ipvers.get('inet') != '')):
                for address, options in addresses['announce'].items():
-                   set_address(address, options.get('interface', 'lo'), True)
+                   set_address(address, options.get('interface', 'lo'), ipvers, True, rt_table)
 
         # announce addresses based on service healthcheck
         if service and (now - service_last) >= (check_interval if service_state in ['up', 'down'] else check_finterval):
@@ -414,6 +483,15 @@ elif sys.argv[2] == 'supervise':
             # announce or withdraw addresses based on service state
             if service_state in ['up','down'] or service_disabled:
                 for address, options in addresses['announce'].items():
+                    matcher = re.match(r'(?P<address>\d[\da-f.:]+)/(?P<netmask>\d+)', address)
+                    if not matcher:
+                       continue
+                    if (ipaddress.ip_address(unicode(str(matcher.group('address')),"utf-8")).version !=  ipvers.get('ver')):
+                       continue
+                    if addresses_hist.get(address):
+                       continue
+                    # Flag  as announced
+                    addresses_hist.update({address: True})
                     weight   = options.get('weight', 0)
                     alwaysup = options.get('alwaysup', False)
                     if weight == 'primary':
@@ -436,7 +514,17 @@ elif sys.argv[2] == 'supervise':
                         line += ' as-path [ %s ]' % aspath
                     print(line)
                 for address in addresses['withdraw'].iterkeys():
+                    matcher = re.match(r'(?P<address>\d[\da-f.:]+)/(?P<netmask>\d+)', address)
+                    if not matcher:
+                       continue
+                    if (ipaddress.ip_address(unicode(str(matcher.group('address')),"utf-8")).version !=  ipvers.get('ver')):
+                       continue
                     if not address in addresses['announce']:
+                        if addresses_hist.get(address,False) == False:
+                           continue
+                        # Flag  as withdrawed
+                        addresses_hist.pop(address)
+                        log("address just removed %s, here is full table %s"% (address,addresses_hist))
                         line = 'neighbor %s withdraw route %s next-hop %s' % (name, address, peer.get('local', {}).get('nexthop', 'self'))
                         print(line)
                 sys.stdout.flush()
