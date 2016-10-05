@@ -193,6 +193,8 @@ def set_route(prefix, nexthop, options = {}, remove = False, rt_table = 'main', 
 
 # remove all local routes under exasrv control
 def cleanup_exit(signal, frame):
+    if 'lockactions' in locals():
+       lockactions.close()
     for line in subprocess.check_output(('ip route list scope global table %s' % rt_table).split(), shell=False).split('\n'):
         if line.find('proto 57') >= 0 or line.find('proto exa') >= 0:
             command = 'ip route delete %s table %s' % (line, rt_table)
@@ -281,6 +283,12 @@ elif sys.argv[2] == 'supervise':
     nh_history       = {}
     ipvers           = {'inet':'', 'ver':0}
     addresses_hist   = {}
+    state_hist       = ''
+    was_disabled     = False
+    try:
+       lockactions      = zc.lockfile.LockFile('/tmp/lockactions')
+    except:
+       pass
     fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL, fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETFL) | os.O_NONBLOCK)
     while True:
 
@@ -425,7 +433,7 @@ elif sys.argv[2] == 'supervise':
             if service_disabled != disabled:
                 service_disabled = disabled
                 log('[service] service is %s%s' % ('disabled' if disabled else 'enabled', ' (and %s)' % service_state if not service_disabled else ''))
-                if action_disable != '' and service_disabled:
+                if action_disable != '' and service_disabled and 'lockactions' in locals():
                     log('[service] running command [%s]' % action_disable)
                     subprocess.call(action_disable.split())
 
@@ -459,7 +467,7 @@ elif sys.argv[2] == 'supervise':
                     if service_checks >= check_rise:
                         service_state = 'up'
                         log('[service] service is up%s' % (' (but disabled)' if service_disabled else ''))
-                        if action_up != '':
+                        if action_up != '' and 'lockactions' in locals():
                             log('[service] running command [%s]' % action_up)
                             subprocess.call(action_up.split())
                 else:
@@ -475,7 +483,7 @@ elif sys.argv[2] == 'supervise':
                     if service_checks >= check_fall:
                         service_state = 'down'
                         log('[service] service is down%s' % (' (and disabled)' if service_disabled else ''))
-                        if action_down != '':
+                        if action_down != '' and 'lockactions' in locals():
                             log('[service] running command [%s]' % action_down)
                             subprocess.call(action_down.split())
                 else:
@@ -496,10 +504,19 @@ elif sys.argv[2] == 'supervise':
                     # Flag  as announced
                     try:
                        cur_hist = addresses_hist.get(address)
-                       if weight == cur_hist.get('weight') and alwaysup == cur_hist.get('alwaysup') and community == cur_hist.get('community') and aspath == cur_hist.get('aspath'):
+                       if (weight == cur_hist.get('weight') and alwaysup == cur_hist.get('alwaysup') and community == cur_hist.get('community') and aspath == cur_hist.get('aspath')) and  ((service_disabled and was_disabled) or (not service_disabled and not was_disabled) or alwaysup) and service_state == state_hist:
                           continue
                     except:
                        pass
+                    if service_disabled:
+                       was_disabled = True
+                    elif not service_disabled:
+		       was_disabled = False
+                    if service_state == 'up':
+                       state_hist = 'up'
+                    elif service_state == 'down':
+                       state_hist = 'down'
+
                     addresses_hist.update({address: {'weight' : weight, 'alwaysup': alwaysup, 'community': community, 'aspath': aspath}})
                     if weight == 'primary':
                         weight = 100
@@ -518,7 +535,7 @@ elif sys.argv[2] == 'supervise':
                     if aspath != '':
                         line += ' as-path [ %s ]' % aspath
                     print(line)
-                addresses_withrawed = []
+                addresses_withdrawed = []
                 for address in addresses['withdraw'].iterkeys():
                     matcher = re.match(r'(?P<address>\d[\da-f.:]+)/(?P<netmask>\d+)', address)
                     if not matcher:
@@ -528,12 +545,12 @@ elif sys.argv[2] == 'supervise':
                     #if not address in addresses['announce'] and addresses_hist.get(address,False):
                     if not address in addresses['announce']:
                         addresses_hist.pop(address)
-			addresses_withrawed.append(address)
+			addresses_withdrawed.append(address)
                         line = 'neighbor %s withdraw route %s next-hop %s' % (name, address, peer.get('local', {}).get('nexthop', 'self'))
                         print(line)
-                for address in addresses_withrawed:
+                for address in addresses_withdrawed:
 			addresses['withdraw'].pop(address)
-                addresses_withrawed = []
+                addresses_withdrawed = []
                 sys.stdout.flush()
 
 else:
