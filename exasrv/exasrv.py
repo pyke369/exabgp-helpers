@@ -327,7 +327,11 @@ elif sys.argv[2] == 'supervise':
                     if (bool(options.get('ignore', False))):
                         continue
                     options.pop('ignore', None)
+                    cascade = options.get('cascade', [])
+                    options.pop('cascade', None)
                     set_route(prefix, routes[action][route][0], options, action == 'withdraw')
+                    for prefix in cascade:
+                        set_route(prefix, routes[action][route][0], options, action == 'withdraw')
 
         # ensure needed local adresses are properly configured
         if now - ip_last >= 5:
