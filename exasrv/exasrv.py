@@ -269,6 +269,18 @@ elif sys.argv[2] == 'supervise':
                                 for route in routes['announce']:
                                     routes['withdraw'][route] = routes['announce'][route]
                                 routes['announce'].clear()
+                            else:
+                                statics = {}
+                                for route, options in group.get('routes', {}).items():
+                                    if options.get('static', False):
+                                        statics[route] = options
+                                for route, options in peer.get('routes', {}).items():
+                                    if options.get('static', False):
+                                        statics[route] = options
+                                for route in statics.keys():
+                                    key = '%s-0' % route
+                                    routes['announce'][key] = [name, 0]
+                                    routes['withdraw'].pop(key, None)
 
                         elif type == 'update':
                             routes_last = 0
@@ -329,6 +341,7 @@ elif sys.argv[2] == 'supervise':
                     options.pop('ignore', None)
                     cascade = options.get('cascade', [])
                     options.pop('cascade', None)
+                    options.pop('static', None)
                     set_route(prefix, routes[action][route][0], options, action == 'withdraw')
                     for prefix in cascade:
                         set_route(prefix, routes[action][route][0], options, action == 'withdraw')
