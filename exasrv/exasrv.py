@@ -355,7 +355,9 @@ elif sys.argv[2] == 'supervise':
                    set_address(address, str(peer.get('local', {}).get('interface', 'lo')))
             if service:
                for address, options in addresses['announce'].items():
-                   set_address(address, options.get('interface', 'lo'), True)
+                   # if service is a range, it's up to the system to create it
+                   if address.endswith('/32'):
+                       set_address(address, options.get('interface', 'lo'), True)
 
         # announce addresses based on service healthcheck
         if service and (now - service_last) >= (check_interval if service_state in ['up', 'down'] else check_finterval):
