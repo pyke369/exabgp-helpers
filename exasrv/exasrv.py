@@ -58,8 +58,8 @@ def load_configuration():
             log('[conf] invalid configuration file "%s"' % conf_path)
     return False
 
-# set local address
-def set_address(address, interface, noarp = False):
+# add local address
+def add_address(address, interface, noarp = False):
     matcher = re.match(r'(?P<address>\d[\da-f.:]+)/(?P<netmask>\d+)', address)
     if not matcher:
         return
@@ -91,6 +91,11 @@ def set_address(address, interface, noarp = False):
     if noarp:
         subprocess.call(str('sysctl -q -w net/ipv4/conf/%s/arp_ignore=1' % rinterface).split())
         subprocess.call(str('sysctl -q -w net/ipv4/conf/%s/arp_announce=2' % rinterface).split())
+
+# remove local address
+def remove_address(address, interface):
+    subprocess.call(str('ip addr delete %s dev %s' % (address, interface)).split())
+    log('[ip] removed address %s from interface %s' % (address, interface))
 
 # set local route
 def set_route(prefix, nexthop, options = {}, remove = False):
@@ -352,10 +357,13 @@ elif sys.argv[2] == 'supervise':
             address = peer.get('local', {}).get('address', None)
             if address:
                 if peer.get('local', {}).get('auto', True):
-                   set_address(address, str(peer.get('local', {}).get('interface', 'lo')))
+                   add_address(address, str(peer.get('local', {}).get('interface', 'lo')))
             if service:
                for address, options in addresses['announce'].items():
-                   set_address(address, options.get('interface', 'lo'), True)
+                   if service_state == 'down' and options.get('autoremove', False) and not options.get('alwaysup', False):
+                       remove_address(address, options.get('interface', 'lo'))
+                   else:
+                       add_address(address, options.get('interface', 'lo'), True)
 
         # announce addresses based on service healthcheck
         if service and (now - service_last) >= (check_interval if service_state in ['up', 'down'] else check_finterval):
