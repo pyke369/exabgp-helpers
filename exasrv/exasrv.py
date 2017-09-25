@@ -360,10 +360,12 @@ elif sys.argv[2] == 'supervise':
                    add_address(address, str(peer.get('local', {}).get('interface', 'lo')))
             if service:
                for address, options in addresses['announce'].items():
-                   if service_state == 'down' and options.get('autoremove', False) and not options.get('alwaysup', False):
-                       remove_address(address, options.get('interface', 'lo'))
-                   else:
-                       add_address(address, options.get('interface', 'lo'), True)
+                   # if service is a range, it's up to the system to touch it
+                   if address.endswith('/32'):
+                       if service_state == 'down' and options.get('autoremove', False) and not options.get('alwaysup', False):
+                           remove_address(address, options.get('interface', 'lo'))
+                       else:
+                           add_address(address, options.get('interface', 'lo'), True)
 
         # announce addresses based on service healthcheck
         if service and (now - service_last) >= (check_interval if service_state in ['up', 'down'] else check_finterval):
