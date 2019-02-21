@@ -2,11 +2,13 @@
 
 # mandatory imports
 from __future__ import print_function
-import sys, os, re, subprocess, time, select, fcntl, signal, syslog
+import sys, os, re, subprocess, time, select, fcntl, hashlib, syslog
 try:
    import simplejson as json
 except ImportError:
    import json
+
+version = '1.2.1'
 
 # log message to both syslog and stderr
 syslog.openlog(re.sub(r'^(.+?)\..+$', r'\1', os.path.basename(sys.argv[0])), logoption=syslog.LOG_PID, facility=syslog.LOG_DAEMON)
@@ -26,9 +28,11 @@ if len(sys.argv) < 3:
 self_path = os.path.realpath(sys.argv[0])
 conf_path = os.path.realpath(sys.argv[1])
 conf_last = 0
+conf_hash = ''
 conf      = {}
+
 def load_configuration():
-    global conf_path, conf_last, conf
+    global conf_path, conf_last, conf_hash, conf
 
     now = time.time()
     if now - conf_last >= 10:
@@ -52,14 +56,18 @@ def load_configuration():
                    pass
                content = matcher.group('before') + include + matcher.group('after')
             content = re.sub(r',(\s*[\}\]])', r'\1', content)
-            conf    = json.loads(content)
+            hash = hashlib.md5(content).hexdigest()
+            if hash != conf_hash:
+                log('[conf] %sloaded configuration file' % ('re' if conf_hash != '' else ''))
+                conf_hash = hash
+                conf      = json.loads(content)
             return True
-        except:
-            log('[conf] invalid configuration file "%s"' % conf_path)
+        except Exception as e:
+            log('[conf] invalid configuration file "%s" / %s' % (conf_path, e))
     return False
 
 # add local address
-def add_address(address, interface, noarp = False):
+def add_address(address, interface):
     matcher = re.match(r'(?P<address>\d[\da-f.:]+)/(?P<netmask>\d+)', address)
     if not matcher:
         return
@@ -77,25 +85,24 @@ def add_address(address, interface, noarp = False):
                    log('[ip] removed address %s/%s from interface %s' % (address, matcher.group('netmask'), rinterface))
     except:
         pass
-
     matcher = re.match(r'^(?P<interface>[^\.]+?)\.(?P<vlan>\d+)$', interface)
     if matcher:
         subprocess.call(str('ip link add link %s name %s type vlan id %s' % (matcher.group('interface'), interface, matcher.group('vlan'))).split())
     matcher = re.match(r'^vlan(?P<vlan>\d+)@(?P<interface>.+)$', interface)
     if matcher:
         subprocess.call(str('ip link add link %s name vlan%s type vlan id %s' % (matcher.group('interface'), matcher.group('vlan'), matcher.group('vlan'))).split())
-
     subprocess.call(str('ip link set %s up' % rinterface).split())
     subprocess.call(str('ip addr add %s/%s broadcast + dev %s' % (address, netmask, rinterface)).split())
     log('[ip] added address %s/%s to interface %s' % (address, netmask, rinterface))
-    if noarp:
-        subprocess.call(str('sysctl -q -w net/ipv4/conf/%s/arp_ignore=1' % rinterface).split())
-        subprocess.call(str('sysctl -q -w net/ipv4/conf/%s/arp_announce=2' % rinterface).split())
 
 # remove local address
 def remove_address(address, interface):
-    subprocess.call(str('ip addr delete %s dev %s' % (address, interface)).split())
-    log('[ip] removed address %s from interface %s' % (address, interface))
+    for line in subprocess.check_output(str('ip addr show %s' % interface).split(), shell=False).split('\n'):
+        matcher = re.match(r'^\s*inet6?\s+(?P<address>\d[\da-f.:]+/\d+)\s+', line)
+        if matcher:
+            if (matcher.group('address') == address):
+                subprocess.call(str('ip addr delete %s dev %s' % (address, interface)).split())
+                log('[ip] removed address %s from interface %s' % (address, interface))
 
 # set local route
 def set_route(prefix, nexthop, options = {}, remove = False):
@@ -156,12 +163,14 @@ def set_route(prefix, nexthop, options = {}, remove = False):
         subprocess.call(command.split())
         log("[ip] added nexthop %s to %s %s" % (nexthop, prefix, options))
 
+
 # remove all local routes under exasrv control
-def cleanup_exit(signal, frame):
+def cleanup_exit():
     for line in subprocess.check_output('ip route list scope global'.split(), shell=False).split('\n'):
         if line.find('proto 57') >= 0 or line.find('proto exa') >= 0:
             command = 'ip route delete %s' % line
             subprocess.call(command.split())
+    log('[local] exit version %s peer %s' % (version, sys.argv[3]))
     sys.exit(0)
 
 # generate ExaBGP configuration
@@ -221,11 +230,13 @@ elif sys.argv[2] == 'supervise':
     if len(sys.argv) <= 3:
         abort('missing peer argument for supervise action - aborting')
 
+    sys.exitfunc = cleanup_exit
+    log('[local] start version %s peer %s' % (version, sys.argv[3]))
     name             = sys.argv[3]
     peer             = service = None
     routes_last      = ip_last = service_last = service_checks = 0
-    service_disabled = False
-    service_state    = 'down'
+    service_groups   = {}
+    service_interval = 0
     routes           = {'announce':{}, 'withdraw':{}}
     addresses        = {'announce':{}, 'withdraw':{}}
     fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL, fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETFL) | os.O_NONBLOCK)
@@ -239,19 +250,17 @@ elif sys.argv[2] == 'supervise':
                     break
             if not peer:
                 abort('peer "%s" not found in configuration - aborting' % name)
-            service         = group.get('service', {})
-            service_disable = str(service.get('disable', ''))
-            check           = service.get('check', {})
-            check_command   = str(check.get('command', ''))
-            check_interval  = max(1, min(20, int(check.get('interval', 5))))
-            check_finterval = max(1, min(5,  int(check.get('finterval', 1))))
-            check_timeout   = max(1, min(10, int(check.get('timeout', 2))))
-            check_rise      = max(1, min(5, int(check.get('rise', 3))))
-            check_fall      = max(1, min(5, int(check.get('fall', 3))))
-            actions         = service.get('actions', {})
-            action_up       = str(actions.get('up', ''))
-            action_down     = str(actions.get('down', ''))
-            action_disable  = str(actions.get('disable', ''))
+            service          = group.get('service', {})
+            check            = service.get('check', {})
+            check_command    = str(check.get('command', ''))
+            check_interval   = max(1, min(20, int(check.get('interval', 5))))
+            check_finterval  = max(1, min(5,  int(check.get('finterval', 1))))
+            check_timeout    = max(1, min(10, int(check.get('timeout', 2))))
+            check_rise       = max(1, min(5, int(check.get('rise', 3))))
+            check_fall       = max(1, min(5, int(check.get('fall', 3))))
+            actions          = service.get('actions', {})
+            action_up        = str(actions.get('up', ''))
+            action_down      = str(actions.get('down', ''))
             addresses['announce'] = {}
             for address, options in service.get('addresses', {}).items():
                 addresses['announce'][address + ('' if re.search(r'/[0-9]+$', address) else '/32')] = options
@@ -321,12 +330,12 @@ elif sys.argv[2] == 'supervise':
                                 log('[bgp] %s %s metric %d via %s learned from peer %s' % (action[0], action[1], metric, action[2], name))
 
                     elif type == 'notification' and str(message.get('notification', '')) == 'shutdown':
-                        signal.signal(signal.SIGTERM, cleanup_exit)
                         routes_last = 0
                         for route in routes['announce']:
                             routes['withdraw'][route] = routes['announce'][route]
                         routes['announce'].clear()
                         log('[local] shutdown')
+                        cleanup_exit()
 
                 except:
                     break
@@ -351,116 +360,113 @@ elif sys.argv[2] == 'supervise':
                     for prefix in cascade:
                         set_route(prefix, routes[action][route][0], options, action == 'withdraw')
 
-        # ensure needed local adresses are properly configured
+        # ensure needed local addresses are properly configured
         if now - ip_last >= 5:
             ip_last = now
             address = peer.get('local', {}).get('address', None)
             if address:
                 if peer.get('local', {}).get('auto', True):
-                   add_address(address, str(peer.get('local', {}).get('interface', 'lo')))
+                    add_address(address, str(peer.get('local', {}).get('interface', 'lo')))
             if service:
-               for address, options in addresses['announce'].items():
-                   # if service is a range, it's up to the system to touch it
-                   if address.endswith('/32'):
-                       if service_state == 'down' and options.get('autoremove', False) and not options.get('alwaysup', False):
-                           remove_address(address, options.get('interface', 'lo'))
-                       else:
-                           add_address(address, options.get('interface', 'lo'), True)
+                for address, options in addresses['announce'].items():
+                    if address.endswith('/32'):
+                        sgroup = options.get('group', 'default')
+                        if sgroup in service_groups and service_groups[sgroup] == 0 and options.get('autoremove', False) and not options.get('alwaysup', False):
+                            remove_address(address, options.get('interface', 'lo'))
+                        else:
+                            add_address(address, options.get('interface', 'lo'))
 
         # announce addresses based on service healthcheck
-        if service and (now - service_last) >= (check_interval if service_state in ['up', 'down'] else check_finterval):
+        if service_interval == 0:
+            service_interval = check_finterval
+        if service and now - service_last >= service_interval:
             service_last = now
 
-            # check for disabling marker
-            disabled = service_disable != '' and os.path.exists(service_disable)
-            if service_disabled != disabled:
-                service_disabled = disabled
-                log('[service] service is %s%s' % ('disabled' if disabled else 'enabled', ' (and %s)' % service_state if not service_disabled else ''))
-                if action_disable != '' and service_disabled:
-                    log('[service] running command [%s]' % action_disable)
-                    subprocess.call(action_disable.split())
-
-            # probe service using the provided command
-            check_success = (check_command == '')
+            # probe service groups using the provided command
+            check_groups = ['default']
             if check_command != '':
+                check_groups = ''
                 try:
                     with open(os.devnull, 'w') as void:
-                        command = subprocess.Popen(check_command.split(), stdout = void, stderr = void, close_fds = True)
+                        command = subprocess.Popen(check_command.split(), stdout = subprocess.PIPE, stderr = void, close_fds = True)
                     now = time.time()
                     while time.time() - now < check_timeout:
                         status = command.poll()
                         if status != None:
-                            check_success = (status == 0)
+                            if status == 57:
+                                check_groups = [sgroup for sgroup in command.stdout.read().strip().replace(' ', '').split(',') if sgroup != '']
+                            else:
+                                check_groups = ['default'] if status == 0 else []
                             break
                         time.sleep(0.1)
                     else:
                         os.kill(command.pid, 9)
                 except Exception as e:
-                   pass
+                    pass
 
-            # run state-machine to determine service status
-            if service_state == 'down':
-                service_checks = 0
-                if check_success:
-                    service_state = 'rising'
-            if service_state == 'rising':
-                if check_success:
-                    service_checks += 1
-                    log('[service] service is rising (%d successful check%s sofar)' % (service_checks, 's' if service_checks > 1 else ''))
-                    if service_checks >= check_rise:
-                        service_state = 'up'
-                        log('[service] service is up%s' % (' (but disabled)' if service_disabled else ''))
-                        if action_up != '':
-                            log('[service] running command [%s]' % action_up)
-                            subprocess.call(action_up.split())
-                else:
-                    service_state = 'down'
-            if service_state == 'up':
-                service_checks = 0
-                if not check_success:
-                   service_state = 'falling'
-            if service_state == 'falling':
-                if not check_success:
-                    service_checks += 1
-                    log('[service] service is falling (%d unsuccessful check%s sofar)' % (service_checks, 's' if service_checks > 1 else ''))
-                    if service_checks >= check_fall:
-                        service_state = 'down'
-                        log('[service] service is down%s' % (' (and disabled)' if service_disabled else ''))
-                        if action_down != '':
-                            log('[service] running command [%s]' % action_down)
-                            subprocess.call(action_down.split())
-                else:
-                   service_state = 'up'
+            # run state-machine to determine service groups statuses
+            for sgroup in check_groups:
+                if sgroup not in service_groups:
+                    service_groups[sgroup] = 0
+                if service_groups[sgroup] < check_rise:
+                    service_groups[sgroup] += 1
+                    log('[service] service group %s is rising (%d successful check%s sofar)' % (sgroup, service_groups[sgroup], 's' if service_groups[sgroup] > 1 else ''))
+                    if service_groups[sgroup] >= check_rise:
+                       log('[service] service group %s is up' % sgroup)
+                       if action_up != '':
+                           log('[service] running command [%s %s]' % (action_up, sgroup))
+                           try:
+                               subprocess.call((action_up + ' ' + sgroup).split())
+                           except:
+                               pass
+            for sgroup in service_groups:
+                if sgroup not in check_groups:
+                    if service_groups[sgroup] > 0:
+                        service_groups[sgroup] -= 1
+                        log('[service] service group %s is falling (%d unsuccessful check%s sofar)' % (sgroup, check_rise - service_groups[sgroup], 's' if check_rise - service_groups[sgroup] > 1 else ''))
+                        if service_groups[sgroup] <= check_rise - check_fall or service_groups[sgroup] == 0:
+                            service_groups[sgroup] = 0
+                            log('[service] service group %s is down' % sgroup)
+                            if action_down != '':
+                                log('[service] running command [%s %s]' % (action_down, sgroup))
+                                try:
+                                    subprocess.call((action_down + ' ' + sgroup).split())
+                                except:
+                                    pass
+            service_interval = check_interval
+            for sgroup in service_groups:
+                if service_groups[sgroup] != 0 and service_groups[sgroup] != check_rise:
+                    service_interval = check_finterval
 
-            # announce or withdraw addresses based on service state
-            if service_state in ['up','down'] or service_disabled:
-                for address, options in addresses['announce'].items():
-                    weight   = options.get('weight', 0)
-                    alwaysup = options.get('alwaysup', False)
-                    if weight == 'primary':
-                        weight = 100
-                    elif weight == 'secondary':
-                        weight = 200
-                    else:
-                        try:
-                            weight = int(weight)
-                        except:
-                            weight = 0
-                    line = 'neighbor %s %s route %s next-hop %s' % (name, 'announce' if (alwaysup or (service_state == 'up' and not service_disabled)) else 'withdraw', address, peer.get('local', {}).get('nexthop', 'self'))
-                    if weight > 0:
-                        line += ' med %d' % weight
-                    community = str(options.get('community', ''))
-                    if community != '':
-                        line += ' community [ %s ]' % community
-                    aspath = str(options.get('aspath', ''))
-                    if aspath != '':
-                        line += ' as-path [ %s ]' % aspath
+            # announce or withdraw addresses based on service groups states
+            for address, options in addresses['announce'].items():
+                sgroup   = options.get('group', 'default')
+                weight   = options.get('weight', 0)
+                alwaysup = options.get('alwaysup', False)
+                if weight == 'primary':
+                    weight = 100
+                elif weight == 'secondary':
+                    weight = 200
+                else:
+                    try:
+                        weight = int(weight)
+                    except:
+                        weight = 0
+                line = 'neighbor %s %s route %s next-hop %s' % (name, 'announce' if (alwaysup or (sgroup in service_groups and service_groups[sgroup] >= check_rise)) else 'withdraw', address, peer.get('local', {}).get('nexthop', 'self'))
+                if weight > 0:
+                    line += ' med %d' % weight
+                community = str(options.get('community', ''))
+                if community != '':
+                    line += ' community [ %s ]' % community
+                aspath = str(options.get('aspath', ''))
+                if aspath != '':
+                    line += ' as-path [ %s ]' % aspath
+                print(line)
+            for address in addresses['withdraw'].iterkeys():
+                if not address in addresses['announce']:
+                    line = 'neighbor %s withdraw route %s next-hop %s' % (name, address, peer.get('local', {}).get('nexthop', 'self'))
                     print(line)
-                for address in addresses['withdraw'].iterkeys():
-                    if not address in addresses['announce']:
-                        line = 'neighbor %s withdraw route %s next-hop %s' % (name, address, peer.get('local', {}).get('nexthop', 'self'))
-                        print(line)
-                sys.stdout.flush()
+            sys.stdout.flush()
 
 else:
     abort('unknown action "%s" - aborting' % sys.argv[2])

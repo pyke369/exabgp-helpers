@@ -1,0 +1,4 @@
+#!/bin/sh
+
+echo default, group1,,,
+exit 57
