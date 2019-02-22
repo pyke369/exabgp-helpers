@@ -8,7 +8,7 @@ try:
 except ImportError:
    import json
 
-version = '1.2.1'
+version = '1.2.2'
 
 # log message to both syslog and stderr
 syslog.openlog(re.sub(r'^(.+?)\..+$', r'\1', os.path.basename(sys.argv[0])), logoption=syslog.LOG_PID, facility=syslog.LOG_DAEMON)
@@ -61,7 +61,7 @@ def load_configuration():
                 log('[conf] %sloaded configuration file' % ('re' if conf_hash != '' else ''))
                 conf_hash = hash
                 conf      = json.loads(content)
-            return True
+                return True
         except Exception as e:
             log('[conf] invalid configuration file "%s" / %s' % (conf_path, e))
     return False
@@ -234,6 +234,7 @@ elif sys.argv[2] == 'supervise':
     log('[local] start version %s peer %s' % (version, sys.argv[3]))
     name             = sys.argv[3]
     peer             = service = None
+    interface_status = 'up'
     routes_last      = ip_last = service_last = service_checks = 0
     service_groups   = {}
     service_interval = 0
@@ -340,9 +341,21 @@ elif sys.argv[2] == 'supervise':
                 except:
                     break
 
+        # check physical network interface status
+        try:
+            handle  = open('/sys/class/net/%s/operstate' % str(peer.get('local', {}).get('interface', '')), 'r')
+            content = handle.read(256)
+            handle.close()
+        except:
+            pass
+        status = 'down' if content.strip() == 'down' else 'up'
+        if interface_status != status:
+            log('[local] peer physical network interface is %s' % status)
+            interface_status = status
+
         # push learned routes to local routing
         now = time.time()
-        if now - routes_last >= 5:
+        if now - routes_last >= 3:
             routes_last = now
             for action in ['announce', 'withdraw']:
                 for route in routes[action]:
@@ -356,12 +369,12 @@ elif sys.argv[2] == 'supervise':
                     cascade = options.get('cascade', [])
                     options.pop('cascade', None)
                     options.pop('static', None)
-                    set_route(prefix, routes[action][route][0], options, action == 'withdraw')
+                    set_route(prefix, routes[action][route][0], options, action == 'withdraw' or interface_status == 'down')
                     for prefix in cascade:
-                        set_route(prefix, routes[action][route][0], options, action == 'withdraw')
+                        set_route(prefix, routes[action][route][0], options, action == 'withdraw' or interface_status == 'down')
 
         # ensure needed local addresses are properly configured
-        if now - ip_last >= 5:
+        if now - ip_last >= 3:
             ip_last = now
             address = peer.get('local', {}).get('address', None)
             if address:
