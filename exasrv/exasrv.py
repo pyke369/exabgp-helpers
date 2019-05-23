@@ -8,7 +8,7 @@ try:
 except ImportError:
    import json
 
-version = '1.2.2'
+version = '1.3.0'
 
 # log message to both syslog and stderr
 syslog.openlog(re.sub(r'^(.+?)\..+$', r'\1', os.path.basename(sys.argv[0])), logoption=syslog.LOG_PID, facility=syslog.LOG_DAEMON)
@@ -171,10 +171,16 @@ def cleanup_exit():
             command = 'ip route delete %s' % line
             subprocess.call(command.split())
     log('[local] exit version %s peer %s' % (version, sys.argv[3]))
-    sys.exit(0)
+    os._exit(0)
 
 # generate ExaBGP configuration
 if sys.argv[2] == 'configure':
+    version = 3
+    for line in subprocess.check_output('exabgp --version'.split(), shell=False).split('\n'):
+        matcher = re.match(r'^ExaBGP\s+:\s+(?P<version>\d+)', line, re.IGNORECASE)
+        if matcher:
+            version = int(matcher.group('version'))
+            break
     load_configuration()
     content   = ''
     supervise = 1
@@ -182,35 +188,71 @@ if sys.argv[2] == 'configure':
         for name, peer in group.get('peers', {}).items():
             local    = peer.get('local', {})
             remote   = peer.get('remote', {})
-            content += ('neighbor %s {\n'
-                        '  router-id %s;\n'
-                        '  local-address %s;\n'
-                        '  local-as %s;\n'
-                        '  peer-as %s;\n'
-                        '  family {\n'
-                        '    ipv4 unicast;\n'
-                        '    ipv6 unicast;\n'
-                        '  }\n'
-                        '  process supervise%d {\n'
-                        '    encoder json;\n'
-                        '    peer-updates;\n'
-                        '    neighbor-changes;\n'
-                        '    receive-routes;\n'
-                        '    run %s %s supervise %s;\n'
-                        '  }\n'
-                        '}\n') %\
-                        (
-                            name,
-                            re.sub(r'^(.+?)(/\d+)$', r'\1',
-                            str(local.get('address', '0.0.0.0'))),
-                            re.sub(r'^(.+?)(/\d+)$', r'\1', str(local.get('address', '0.0.0.0'))),
-                            str(local.get('asnum', '0')),
-                            str(remote.get('asnum', '0')),
-                            supervise,
-                            self_path,
-                            conf_path,
-                            name
-                        )
+            if version >= 4:
+                content += (
+                            'process supervise%d {\n'
+                            '  encoder json;\n'
+                            '  run %s %s supervise %s;\n'
+                            '}\n'
+                            'neighbor %s {\n'
+                            '  router-id %s;\n'
+                            '  local-address %s;\n'
+                            '  local-as %s;\n'
+                            '  peer-as %s;\n'
+                            '  family {\n'
+                            '    ipv4 unicast;\n'
+                            '    ipv6 unicast;\n'
+                            '  }\n'
+                            '  api {\n'
+                            '    processes [ supervise%d ];\n'
+                            '    neighbor-changes;\n'
+                            '    receive {\n'
+                            '      parsed;\n'
+                            '      update;\n'
+                            '    }\n'
+                            '  }\n'
+                            '}\n') % (
+                                supervise,
+                                self_path,
+                                conf_path,
+                                name,
+                                name,
+                                re.sub(r'^(.+?)(/\d+)$', r'\1',
+                                str(local.get('address', '0.0.0.0'))),
+                                re.sub(r'^(.+?)(/\d+)$', r'\1', str(local.get('address', '0.0.0.0'))),
+                                str(local.get('asnum', '0')),
+                                str(remote.get('asnum', '0')),
+                                supervise,
+                            )
+            else:
+                content += ('neighbor %s {\n'
+                            '  router-id %s;\n'
+                            '  local-address %s;\n'
+                            '  local-as %s;\n'
+                            '  peer-as %s;\n'
+                            '  family {\n'
+                            '    ipv4 unicast;\n'
+                            '    ipv6 unicast;\n'
+                            '  }\n'
+                            '  process supervise%d {\n'
+                            '    encoder json;\n'
+                            '    peer-updates;\n'
+                            '    neighbor-changes;\n'
+                            '    receive-routes;\n'
+                            '    run %s %s supervise %s;\n'
+                            '  }\n'
+                            '}\n') % (
+                                name,
+                                re.sub(r'^(.+?)(/\d+)$', r'\1',
+                                str(local.get('address', '0.0.0.0'))),
+                                re.sub(r'^(.+?)(/\d+)$', r'\1', str(local.get('address', '0.0.0.0'))),
+                                str(local.get('asnum', '0')),
+                                str(remote.get('asnum', '0')),
+                                supervise,
+                                self_path,
+                                conf_path,
+                                name
+                            )
             supervise += 1
     if len(sys.argv) > 3:
         mcontent = ''
@@ -276,7 +318,7 @@ elif sys.argv[2] == 'supervise':
                     message  = json.loads(line)
                     neighbor = message.get('neighbor', {})
                     type     = str(message.get('type', ''))
-                    if str(neighbor.get('ip', '')) == name:
+                    if str(neighbor.get('address', {}).get('peer', '')) == name:
                         if type == 'state':
                             log('[bgp] peer %s is %s' % (name, str(neighbor.get('state', 'up'))))
                             if str(neighbor.get('state', 'up')) == 'down':
@@ -308,6 +350,8 @@ elif sys.argv[2] == 'supervise':
                                             for key3, value3 in value2.items():
                                                 if key1 == 'announce':
                                                     for value4 in value3:
+                                                        if isinstance(value4, dict):
+                                                            value4 = value4.get('nlri', '')
                                                         actions.append([key1, value4, key3])
                                                 else:
                                                     actions.append([key1, key3, name])
