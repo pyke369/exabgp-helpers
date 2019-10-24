@@ -8,7 +8,7 @@ try:
 except ImportError:
    import json
 
-version = '1.3.0'
+version = '1.3.1'
 
 # log message to both syslog and stderr
 syslog.openlog(re.sub(r'^(.+?)\..+$', r'\1', os.path.basename(sys.argv[0])), logoption=syslog.LOG_PID, facility=syslog.LOG_DAEMON)
@@ -392,7 +392,7 @@ elif sys.argv[2] == 'supervise':
             handle.close()
         except:
             pass
-        status = 'down' if content.strip() == 'down' else 'up'
+        status = 'down' if content.find('down') >= 0 else 'up'
         if interface_status != status:
             log('[local] peer physical network interface is %s' % status)
             interface_status = status
