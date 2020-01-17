@@ -92,7 +92,10 @@ def add_address(address, interface):
     if matcher:
         subprocess.call(str('ip link add link %s name vlan%s type vlan id %s' % (matcher.group('interface'), matcher.group('vlan'), matcher.group('vlan'))).split())
     subprocess.call(str('ip link set %s up' % rinterface).split())
-    subprocess.call(str('ip addr add %s/%s broadcast + dev %s' % (address, netmask, rinterface)).split())
+    if ":" in address:
+        subprocess.call(str('ip -6 addr add %s/%s dev %s' % (address, netmask, rinterface)).split())
+    else:
+        subprocess.call(str('ip addr add %s/%s broadcast + dev %s' % (address, netmask, rinterface)).split())
     log('[ip] added address %s/%s to interface %s' % (address, netmask, rinterface))
 
 # remove local address
@@ -108,30 +111,37 @@ def remove_address(address, interface):
 def set_route(prefix, nexthop, options = {}, remove = False):
     rtable = {}
     rkey   = None
-    for line in subprocess.check_output('ip route list scope global'.split(), shell=False).split('\n'):
-        matcher = re.match(r'^(?P<prefix>\S+)(?:\s+via\s+(?P<gateway>\S+))?(?:\s*(?P<options>.+?)\s*)?$', line)
-        if matcher:
-            lprefix  = matcher.group('prefix') if matcher.group('prefix') != 'default' else '0.0.0.0/0'
-            lgateway = matcher.group('gateway')
-            loptions = matcher.group('options').split()
-            loptions = dict(zip(loptions[::2], loptions[1::2]))
-            loptions.pop('dev', None)
-            rkey = lprefix + '-' + str(loptions.get('metric', '0'))
-            if not rtable.get(rkey, None):
-                rtable[rkey] = {'options': loptions, 'nexthops': {}}
-            if lgateway:
-                rtable[rkey]['nexthops'][lgateway] = 1
-                rkey = None
-        else:
-            matcher = re.match(r'^\s*nexthop\s+via\s+(?P<gateway>\S+)(?:\s+(?P<options>.+?)\s*)?$', line)
-            if matcher and rkey:
+    for inet in [4, 6]:
+        for line in subprocess.check_output(('ip -%d route list scope global' % inet).split(), shell=False).split('\n'):
+            matcher = re.match(r'^(?P<prefix>\S+)(?:\s+via\s+(?P<gateway>\S+))?(?:\s*(?P<options>.+?)\s*)?$', line)
+            if matcher:
+                if matcher.group('prefix') != 'default':
+                   lprefix = matcher.group('prefix')
+                elif inet == 6:
+                   lprefix = '::/0'
+                else:
+                   lprefix = '0.0.0.0/0'
                 lgateway = matcher.group('gateway')
                 loptions = matcher.group('options').split()
                 loptions = dict(zip(loptions[::2], loptions[1::2]))
                 loptions.pop('dev', None)
-                rtable[rkey]['nexthops'][lgateway] = int(loptions.get('weight', 1))
+                rkey = lprefix + '-' + str(loptions.get('metric', '0'))
+                if not rtable.get(rkey, None):
+                    rtable[rkey] = {'options': loptions, 'nexthops': {}}
+                if lgateway:
+                    rtable[rkey]['nexthops'][lgateway] = 1
+                    rkey = None
+            else:
+                matcher = re.match(r'^\s*nexthop\s+via\s+(?P<gateway>\S+)(?:\s+(?P<options>.+?)\s*)?$', line)
+                if matcher and rkey:
+                    lgateway = matcher.group('gateway')
+                    loptions = matcher.group('options').split()
+                    loptions = dict(zip(loptions[::2], loptions[1::2]))
+                    loptions.pop('dev', None)
+                    rtable[rkey]['nexthops'][lgateway] = int(loptions.get('weight', 1))
 
-    rkey   = prefix + '-' + (str(options.get('metric', '0')) if options else '0')
+    defaultmetric = '1024' if ':' in prefix else '0'
+    rkey   = prefix + '-' + (str(options.get('metric', defaultmetric)) if options else defaultmetric)
     info   = rtable.get(rkey, None)
     weight = int(options.get('weight', 1))
     if info:
@@ -163,13 +173,13 @@ def set_route(prefix, nexthop, options = {}, remove = False):
         subprocess.call(command.split())
         log("[ip] added nexthop %s to %s %s" % (nexthop, prefix, options))
 
-
 # remove all local routes under exasrv control
 def cleanup_exit():
-    for line in subprocess.check_output('ip route list scope global'.split(), shell=False).split('\n'):
-        if line.find('proto 57') >= 0 or line.find('proto exa') >= 0:
-            command = 'ip route delete %s' % line
-            subprocess.call(command.split())
+    for inet in [4, 6]:
+        for line in subprocess.check_output(('ip -%d route list scope global' % inet).split(), shell=False).split('\n'):
+            if line.find('proto 57') >= 0 or line.find('proto exa') >= 0:
+                command = 'ip -%d route delete %s' % (inet, line)
+                subprocess.call(command.split())
     log('[local] exit version %s peer %s' % (version, sys.argv[3]))
     os._exit(0)
 
@@ -340,12 +350,15 @@ elif sys.argv[2] == 'supervise':
                                     routes['withdraw'].pop(key, None)
 
                         elif type == 'update':
-                            routes_last = 0
-                            metric      = 0
-                            actions     = []
+                            routes_last   = 0
+                            metric        = 0
+                            defaultmetric = 0
+                            actions       = []
                             for key1, value1 in neighbor.get('message', {}).get('update', {}).items():
                                 if key1 in ['announce', 'withdraw']:
                                     for key2, value2 in value1.items():
+                                        if key2 == 'ipv6 unicast':
+                                            defaultmetric = 1024
                                         if key2 in ['ipv4 unicast', 'ipv6 unicast']:
                                             for key3, value3 in value2.items():
                                                 if key1 == 'announce':
@@ -361,6 +374,8 @@ elif sys.argv[2] == 'supervise':
                                             metric = value2
                             for action in actions:
                                 if action[0] == 'announce':
+                                    if metric == 0:
+                                        metric = defaultmetric
                                     key = '%s-%d' % (action[1], metric)
                                     routes['announce'][key] = [action[2], metric]
                                     routes['withdraw'].pop(key, None)
@@ -368,6 +383,8 @@ elif sys.argv[2] == 'supervise':
                                     for route in routes['announce']:
                                         if action[1] == re.sub(r'^(.+?)-\d+$', r'\1', route):
                                             metric = int(re.sub(r'^.+?-(\d+)$', r'\1', route))
+                                            if metric == 0:
+                                                metric = defaultmetric
                                             key    = '%s-%d' % (action[1], metric)
                                             routes['withdraw'][key] = [action[2], metric]
                                             routes['announce'].pop(key, None)
@@ -426,7 +443,7 @@ elif sys.argv[2] == 'supervise':
                     add_address(address, str(peer.get('local', {}).get('interface', 'lo')))
             if service:
                 for address, options in addresses['announce'].items():
-                    if address.endswith('/32'):
+                    if (':' not in address and address.endswith('/32')) or address.endswith('/128'):
                         sgroup = options.get('group', 'default')
                         if sgroup in service_groups and service_groups[sgroup] == 0 and options.get('autoremove', False) and not options.get('alwaysup', False):
                             remove_address(address, options.get('interface', 'lo'))
@@ -500,6 +517,7 @@ elif sys.argv[2] == 'supervise':
                 sgroup   = options.get('group', 'default')
                 weight   = options.get('weight', 0)
                 alwaysup = options.get('alwaysup', False)
+                nexthop = 'nexthop6' if ":" in address else 'nexthop'
                 if weight == 'primary':
                     weight = 100
                 elif weight == 'secondary':
@@ -509,7 +527,7 @@ elif sys.argv[2] == 'supervise':
                         weight = int(weight)
                     except:
                         weight = 0
-                line = 'neighbor %s %s route %s next-hop %s' % (name, 'announce' if (alwaysup or (sgroup in service_groups and service_groups[sgroup] >= check_rise)) else 'withdraw', address, peer.get('local', {}).get('nexthop', 'self'))
+                line = 'neighbor %s %s route %s next-hop %s' % (name, 'announce' if (alwaysup or (sgroup in service_groups and service_groups[sgroup] >= check_rise)) else 'withdraw', address, peer.get('local', {}).get(nexthop, 'self'))
                 if weight > 0:
                     line += ' med %d' % weight
                 community = str(options.get('community', ''))
@@ -520,8 +538,9 @@ elif sys.argv[2] == 'supervise':
                     line += ' as-path [ %s ]' % aspath
                 print(line)
             for address in addresses['withdraw'].iterkeys():
+                nexthop = 'nexthop6' if ":" in address else 'nexthop'
                 if not address in addresses['announce']:
-                    line = 'neighbor %s withdraw route %s next-hop %s' % (name, address, peer.get('local', {}).get('nexthop', 'self'))
+                    line = 'neighbor %s withdraw route %s next-hop %s' % (name, address, peer.get('local', {}).get(nexthop, 'self'))
                     print(line)
             sys.stdout.flush()
 
