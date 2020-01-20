@@ -316,7 +316,8 @@ elif sys.argv[2] == 'supervise':
             action_down      = str(actions.get('down', ''))
             addresses['announce'] = {}
             for address, options in service.get('addresses', {}).items():
-                addresses['announce'][address + ('' if re.search(r'/[0-9]+$', address) else '/32')] = options
+                cidr = '/128' if ':' in address else '/32'
+                addresses['announce'][address + ('' if re.search(r'/[0-9]+$', address) else cidr)] = options
             addresses['withdraw'].update(addresses['announce'])
 
         # receive and interpret BGP announces/withdraws from BGP peers
