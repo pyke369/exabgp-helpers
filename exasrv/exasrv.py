@@ -16,6 +16,18 @@ def log(message):
     syslog.syslog(message)
     print(message, file=sys.stderr)
 
+def isv6(address):
+    matcher = re.match(r'^[0-9a-f:]+(/[0-9]+)?$', address)
+    if matcher:
+        return True
+    return False
+
+def isv4(address):
+    matcher = re.match(r'^[0-9.]+(/[0-9]+)?$', address)
+    if matcher:
+        return True
+    return False
+
 # log fatal message and exit
 def abort(message):
     log('[fatal] %s' % message)
@@ -92,7 +104,7 @@ def add_address(address, interface):
     if matcher:
         subprocess.call(str('ip link add link %s name vlan%s type vlan id %s' % (matcher.group('interface'), matcher.group('vlan'), matcher.group('vlan'))).split())
     subprocess.call(str('ip link set %s up' % rinterface).split())
-    if ":" in address:
+    if isv6(address):
         subprocess.call(str('ip -6 addr add %s/%s dev %s' % (address, netmask, rinterface)).split())
     else:
         subprocess.call(str('ip addr add %s/%s broadcast + dev %s' % (address, netmask, rinterface)).split())
@@ -140,7 +152,7 @@ def set_route(prefix, nexthop, options = {}, remove = False):
                     loptions.pop('dev', None)
                     rtable[rkey]['nexthops'][lgateway] = int(loptions.get('weight', 1))
 
-    defaultmetric = '1024' if ':' in prefix else '0'
+    defaultmetric = '1024' if isv6(prefix) else '0'
     rkey   = prefix + '-' + (str(options.get('metric', defaultmetric)) if options else defaultmetric)
     info   = rtable.get(rkey, None)
     weight = int(options.get('weight', 1))
@@ -316,8 +328,8 @@ elif sys.argv[2] == 'supervise':
             action_down      = str(actions.get('down', ''))
             addresses['announce'] = {}
             for address, options in service.get('addresses', {}).items():
-                mask = '/128' if ':' in address else '/32'
-                addresses['announce'][address + ('' if re.search(r'/[0-9]+$', address) else mask)] = options
+                cidr = '/128' if isv6(address) else '/32'
+                addresses['announce'][address + ('' if re.search(r'/[0-9]+$', address) else cidr)] = options
             addresses['withdraw'].update(addresses['announce'])
 
         # receive and interpret BGP announces/withdraws from BGP peers
@@ -444,7 +456,7 @@ elif sys.argv[2] == 'supervise':
                     add_address(address, str(peer.get('local', {}).get('interface', 'lo')))
             if service:
                 for address, options in addresses['announce'].items():
-                    if (':' not in address and address.endswith('/32')) or address.endswith('/128'):
+                    if (isv4(address) and address.endswith('/32')) or address.endswith('/128'):
                         sgroup = options.get('group', 'default')
                         if sgroup in service_groups and service_groups[sgroup] == 0 and options.get('autoremove', False) and not options.get('alwaysup', False):
                             remove_address(address, options.get('interface', 'lo'))
@@ -518,7 +530,6 @@ elif sys.argv[2] == 'supervise':
                 sgroup   = options.get('group', 'default')
                 weight   = options.get('weight', 0)
                 alwaysup = options.get('alwaysup', False)
-                nexthop = 'nexthop6' if ":" in address else 'nexthop'
                 if weight == 'primary':
                     weight = 100
                 elif weight == 'secondary':
@@ -528,7 +539,22 @@ elif sys.argv[2] == 'supervise':
                         weight = int(weight)
                     except:
                         weight = 0
-                line = 'neighbor %s %s route %s next-hop %s' % (name, 'announce' if (alwaysup or (sgroup in service_groups and service_groups[sgroup] >= check_rise)) else 'withdraw', address, peer.get('local', {}).get(nexthop, 'self'))
+
+                bgp_ip = peer.get('local', {}).get('address', '')
+                nexthop = 'nexthop6' if isv6(address) else 'nexthop'
+                real_nexthop = peer.get('local', {}).get(nexthop, 'self')
+
+                # ignore this announce if the session is in IPv6 and we
+                # announce an IPv4 with nexthop self or an IPv6 nexthop
+                if isv6(bgp_ip) and isv4(address) and (real_nexthop == 'self' or isv6(real_nexthop)):
+                    continue
+
+                # ignore this announce if the session is in IPv4 and we
+                # announce an IPv6 with nexthop self or an IPv4 nexthop
+                if isv4(bgp_ip) and isv6(address) and (real_nexthop == 'self' or isv4(real_nexthop)):
+                    continue
+
+                line = 'neighbor %s %s route %s next-hop %s' % (name, 'announce' if (alwaysup or (sgroup in service_groups and service_groups[sgroup] >= check_rise)) else 'withdraw', address, real_nexthop)
                 if weight > 0:
                     line += ' med %d' % weight
                 community = str(options.get('community', ''))
@@ -539,7 +565,7 @@ elif sys.argv[2] == 'supervise':
                     line += ' as-path [ %s ]' % aspath
                 print(line)
             for address in addresses['withdraw'].iterkeys():
-                nexthop = 'nexthop6' if ":" in address else 'nexthop'
+                nexthop = 'nexthop6' if isv6(address) else 'nexthop'
                 if not address in addresses['announce']:
                     line = 'neighbor %s withdraw route %s next-hop %s' % (name, address, peer.get('local', {}).get(nexthop, 'self'))
                     print(line)
