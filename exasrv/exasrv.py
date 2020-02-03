@@ -8,7 +8,7 @@ try:
 except ImportError:
    import json
 
-version = '1.3.1'
+version = '1.4.0'
 
 # log message to both syslog and stderr
 syslog.openlog(re.sub(r'^(.+?)\..+$', r'\1', os.path.basename(sys.argv[0])), logoption=syslog.LOG_PID, facility=syslog.LOG_DAEMON)
@@ -66,6 +66,12 @@ def load_configuration():
             log('[conf] invalid configuration file "%s" / %s' % (conf_path, e))
     return False
 
+# match address inet family
+def inet4(address):
+    return re.match(r'^[0-9.]+(/[0-9]+)?$', address)
+def inet6(address):
+    return re.match(r'^[0-9a-f:]+(/[0-9]+)?$', address)
+
 # add local address
 def add_address(address, interface):
     matcher = re.match(r'(?P<address>\d[\da-f.:]+)/(?P<netmask>\d+)', address)
@@ -92,7 +98,7 @@ def add_address(address, interface):
     if matcher:
         subprocess.call(str('ip link add link %s name vlan%s type vlan id %s' % (matcher.group('interface'), matcher.group('vlan'), matcher.group('vlan'))).split())
     subprocess.call(str('ip link set %s up' % rinterface).split())
-    if ":" in address:
+    if inet6(address):
         subprocess.call(str('ip -6 addr add %s/%s dev %s' % (address, netmask, rinterface)).split())
     else:
         subprocess.call(str('ip addr add %s/%s broadcast + dev %s' % (address, netmask, rinterface)).split())
@@ -140,7 +146,7 @@ def set_route(prefix, nexthop, options = {}, remove = False):
                     loptions.pop('dev', None)
                     rtable[rkey]['nexthops'][lgateway] = int(loptions.get('weight', 1))
 
-    defaultmetric = '1024' if ':' in prefix else '0'
+    defaultmetric = '1024' if inet6(prefix) else '0'
     rkey   = prefix + '-' + (str(options.get('metric', defaultmetric)) if options else defaultmetric)
     info   = rtable.get(rkey, None)
     weight = int(options.get('weight', 1))
@@ -316,7 +322,7 @@ elif sys.argv[2] == 'supervise':
             action_down      = str(actions.get('down', ''))
             addresses['announce'] = {}
             for address, options in service.get('addresses', {}).items():
-                mask = '/128' if ':' in address else '/32'
+                mask = '/128' if inet6(address) else '/32'
                 addresses['announce'][address + ('' if re.search(r'/[0-9]+$', address) else mask)] = options
             addresses['withdraw'].update(addresses['announce'])
 
@@ -404,6 +410,7 @@ elif sys.argv[2] == 'supervise':
                     break
 
         # check physical network interface status
+        content = ''
         try:
             handle  = open('/sys/class/net/%s/operstate' % str(peer.get('local', {}).get('interface', '')), 'r')
             content = handle.read(256)
@@ -444,7 +451,7 @@ elif sys.argv[2] == 'supervise':
                     add_address(address, str(peer.get('local', {}).get('interface', 'lo')))
             if service:
                 for address, options in addresses['announce'].items():
-                    if (':' not in address and address.endswith('/32')) or address.endswith('/128'):
+                    if (inet4(address) and address.endswith('/32')) or (inet6(address) and address.endswith('/128')):
                         sgroup = options.get('group', 'default')
                         if sgroup in service_groups and service_groups[sgroup] == 0 and options.get('autoremove', False) and not options.get('alwaysup', False):
                             remove_address(address, options.get('interface', 'lo'))
@@ -518,7 +525,6 @@ elif sys.argv[2] == 'supervise':
                 sgroup   = options.get('group', 'default')
                 weight   = options.get('weight', 0)
                 alwaysup = options.get('alwaysup', False)
-                nexthop = 'nexthop6' if ":" in address else 'nexthop'
                 if weight == 'primary':
                     weight = 100
                 elif weight == 'secondary':
@@ -528,7 +534,11 @@ elif sys.argv[2] == 'supervise':
                         weight = int(weight)
                     except:
                         weight = 0
-                line = 'neighbor %s %s route %s next-hop %s' % (name, 'announce' if (alwaysup or (sgroup in service_groups and service_groups[sgroup] >= check_rise)) else 'withdraw', address, peer.get('local', {}).get(nexthop, 'self'))
+                laddress = peer.get('local', {}).get('address', None)
+                nexthop  = peer.get('local', {}).get('nexthop6' if inet6(address) else 'nexthop', 'self')
+                if (inet6(laddress) and inet4(address) and (nexthop == 'self' or inet6(nexthop))) or (inet4(laddress) and inet6(address) and (nexthop == 'self' or inet4(nexthop))):
+                    continue
+                line = 'neighbor %s %s route %s next-hop %s' % (name, 'announce' if (alwaysup or (sgroup in service_groups and service_groups[sgroup] >= check_rise)) else 'withdraw', address, nexthop)
                 if weight > 0:
                     line += ' med %d' % weight
                 community = str(options.get('community', ''))
@@ -539,9 +549,8 @@ elif sys.argv[2] == 'supervise':
                     line += ' as-path [ %s ]' % aspath
                 print(line)
             for address in addresses['withdraw'].iterkeys():
-                nexthop = 'nexthop6' if ":" in address else 'nexthop'
                 if not address in addresses['announce']:
-                    line = 'neighbor %s withdraw route %s next-hop %s' % (name, address, peer.get('local', {}).get(nexthop, 'self'))
+                    line = 'neighbor %s withdraw route %s next-hop %s' % (name, address, peer.get('local', {}).get('nexthop6' if inet6(address) else 'nexthop', 'self'))
                     print(line)
             sys.stdout.flush()
 
