@@ -8,7 +8,7 @@ try:
 except ImportError:
    import json
 
-version = '1.4.0'
+version = '1.4.1'
 
 # log message to both syslog and stderr
 syslog.openlog(re.sub(r'^(.+?)\..+$', r'\1', os.path.basename(sys.argv[0])), logoption=syslog.LOG_PID, facility=syslog.LOG_DAEMON)
@@ -368,13 +368,14 @@ elif sys.argv[2] == 'supervise':
                                             defaultmetric = 1024
                                         if key2 in ['ipv4 unicast', 'ipv6 unicast']:
                                             for key3, value3 in value2.items():
-                                                if key1 == 'announce':
-                                                    for value4 in value3:
-                                                        if isinstance(value4, dict):
-                                                            value4 = value4.get('nlri', '')
-                                                        actions.append([key1, value4, key3])
-                                                else:
-                                                    actions.append([key1, key3, name])
+                                                if key3 != 'null':
+                                                    if key1 == 'announce':
+                                                        for value4 in value3:
+                                                            if isinstance(value4, dict):
+                                                                value4 = value4.get('nlri', '')
+                                                            actions.append([key1, value4, key3])
+                                                    else:
+                                                        actions.append([key1, key3, name])
                                 elif key1 == 'attribute':
                                     for key2, value2 in value1.items():
                                         if key2 == 'med':
