@@ -294,7 +294,7 @@ elif sys.argv[2] == 'supervise':
     peer             = service = None
     interface_status = 'up'
     routes_last      = ip_last = service_last = service_checks = 0
-    service_groups   = {}
+    service_groups   = {'default': 0}
     service_interval = 0
     routes           = {'announce':{}, 'withdraw':{}}
     addresses        = {'announce':{}, 'withdraw':{}}
