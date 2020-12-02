@@ -8,7 +8,7 @@ try:
 except ImportError:
    import json
 
-version = '1.4.1'
+version = '1.4.2'
 
 # log message to both syslog and stderr
 syslog.openlog(re.sub(r'^(.+?)\..+$', r'\1', os.path.basename(sys.argv[0])), logoption=syslog.LOG_PID, facility=syslog.LOG_DAEMON)
@@ -453,11 +453,14 @@ elif sys.argv[2] == 'supervise':
             if service:
                 for address, options in addresses['announce'].items():
                     if (inet4(address) and address.endswith('/32')) or (inet6(address) and address.endswith('/128')):
-                        sgroup = options.get('group', 'default')
-                        if sgroup in service_groups and service_groups[sgroup] == 0 and options.get('autoremove', False) and not options.get('alwaysup', False):
-                            remove_address(address, options.get('interface', 'lo'))
-                        else:
+                        if options.get('alwaysup', False):
                             add_address(address, options.get('interface', 'lo'))
+                        else:
+                            sgroup = options.get('group', 'default')
+                            if sgroup in service_groups and service_groups[sgroup] != 0:
+                                add_address(address, options.get('interface', 'lo'))
+                            elif options.get('autoremove', False):
+                                remove_address(address, options.get('interface', 'lo'))
 
         # announce addresses based on service healthcheck
         if service_interval == 0:
