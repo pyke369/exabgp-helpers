@@ -8,7 +8,7 @@ try:
 except ImportError:
    import json
 
-version = '1.4.2'
+version = '1.4.3'
 
 # log message to both syslog and stderr
 syslog.openlog(re.sub(r'^(.+?)\..+$', r'\1', os.path.basename(sys.argv[0])), logoption=syslog.LOG_PID, facility=syslog.LOG_DAEMON)
@@ -483,10 +483,13 @@ elif sys.argv[2] == 'supervise':
                                 check_groups = [sgroup for sgroup in command.stdout.read().strip().replace(' ', '').split(',') if sgroup != '']
                             else:
                                 check_groups = ['default'] if status == 0 else []
+                                if status != 0:
+                                    log('[service] probe [%s] exited with status %d' % (check_command, status))
                             break
                         time.sleep(0.1)
                     else:
                         os.kill(command.pid, 9)
+                        log('[service] probe [%s] was killed after %d second(s)' % (check_command, check_timeout))
                 except Exception as e:
                     pass
 
