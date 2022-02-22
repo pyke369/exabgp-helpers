@@ -118,7 +118,7 @@ def set_route(prefix, nexthop, options = {}, remove = False):
     rtable = {}
     rkey   = None
     for inet in [4, 6]:
-        for line in subprocess.check_output(('ip -%d route list scope global' % inet).split(), shell=False).split('\n'):
+        for line in subprocess.check_output(('ip -%d route list scope global table all' % inet).split(), shell=False).split('\n'):
             matcher = re.match(r'^(?P<prefix>\S+)(?:\s+via\s+(?P<gateway>\S+))?(?:\s*(?P<options>.+?)\s*)?$', line)
             if matcher:
                 if matcher.group('prefix') != 'default':
@@ -182,7 +182,7 @@ def set_route(prefix, nexthop, options = {}, remove = False):
 # remove all local routes under exasrv control
 def cleanup_exit():
     for inet in [4, 6]:
-        for line in subprocess.check_output(('ip -%d route list scope global' % inet).split(), shell=False).split('\n'):
+        for line in subprocess.check_output(('ip -%d route list scope global table all' % inet).split(), shell=False).split('\n'):
             if line.find('proto 57') >= 0 or line.find('proto exa') >= 0:
                 command = 'ip -%d route delete %s' % (inet, line)
                 subprocess.call(command.split())
