@@ -456,11 +456,12 @@ elif sys.argv[2] == 'supervise':
                         if options.get('alwaysup', False):
                             add_address(address, options.get('interface', 'lo'))
                         else:
-                            sgroup = options.get('group', 'default')
-                            if sgroup in service_groups and service_groups[sgroup] != 0:
-                                add_address(address, options.get('interface', 'lo'))
-                            elif options.get('autoremove', False):
-                                remove_address(address, options.get('interface', 'lo'))
+                            if options.get('auto', True):
+                                sgroup = options.get('group', 'default')
+                                if sgroup in service_groups and service_groups[sgroup] != 0:
+                                    add_address(address, options.get('interface', 'lo'))
+                                elif options.get('autoremove', False):
+                                    remove_address(address, options.get('interface', 'lo'))
 
         # announce addresses based on service healthcheck
         if service_interval == 0:
