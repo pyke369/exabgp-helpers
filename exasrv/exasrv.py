@@ -2,13 +2,14 @@
 
 # mandatory imports
 from __future__ import print_function
+from signal import signal, SIGINT, SIGTERM, SIGHUP
 import sys, os, re, subprocess, time, select, fcntl, hashlib, syslog
 try:
    import simplejson as json
 except ImportError:
    import json
 
-version = '1.4.3'
+version = '1.4.6'
 
 # log message to both syslog and stderr
 syslog.openlog(re.sub(r'^(.+?)\..+$', r'\1', os.path.basename(sys.argv[0])), logoption=syslog.LOG_PID, facility=syslog.LOG_DAEMON)
@@ -189,6 +190,9 @@ def cleanup_exit():
     log('[local] exit version %s peer %s' % (version, sys.argv[3]))
     os._exit(0)
 
+def signal_handler(sig, frame):
+    cleanup_exit()
+
 # generate ExaBGP configuration
 if sys.argv[2] == 'configure':
     version = 3
@@ -288,7 +292,10 @@ elif sys.argv[2] == 'supervise':
     if len(sys.argv) <= 3:
         abort('missing peer argument for supervise action - aborting')
 
-    sys.exitfunc = cleanup_exit
+    signal(SIGINT, signal_handler)
+    signal(SIGTERM, signal_handler)
+    signal(SIGHUP, signal_handler)
+
     log('[local] start version %s peer %s' % (version, sys.argv[3]))
     name             = sys.argv[3]
     peer             = service = None
@@ -327,11 +334,17 @@ elif sys.argv[2] == 'supervise':
             addresses['withdraw'].update(addresses['announce'])
 
         # receive and interpret BGP announces/withdraws from BGP peers
-        ready, _, _ = select.select([sys.stdin], [], [], 1)
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], 1)
+        except Exception as e:
+            pass
+
         if ready:
             while True:
                 try:
                     line = sys.stdin.readline().strip()
+                    if line == '':
+                        cleanup_exit()
                     message  = json.loads(line)
                     neighbor = message.get('neighbor', {})
                     type     = str(message.get('type', ''))
@@ -491,7 +504,7 @@ elif sys.argv[2] == 'supervise':
                     else:
                         os.kill(command.pid, 9)
                         log('[service] probe [%s] was killed after %d second(s)' % (check_command, check_timeout))
-                except Exception as e:
+                except Exception:
                     pass
 
             # run state-machine to determine service groups statuses
@@ -546,19 +559,24 @@ elif sys.argv[2] == 'supervise':
                 nexthop  = peer.get('local', {}).get('nexthop6' if inet6(address) else 'nexthop', 'self')
                 if (inet6(laddress) and inet4(address) and (nexthop == 'self' or inet6(nexthop))) or (inet4(laddress) and inet6(address) and (nexthop == 'self' or inet4(nexthop))):
                     continue
-                line = 'neighbor %s %s route %s next-hop %s' % (name, 'announce' if (alwaysup or (sgroup in service_groups and service_groups[sgroup] >= check_rise)) else 'withdraw', address, nexthop)
-                if weight > 0:
-                    line += ' med %d' % weight
-                community = str(options.get('community', ''))
-                if community != '':
-                    line += ' community [ %s ]' % community
-                aspath = str(options.get('aspath', ''))
-                if aspath != '':
-                    line += ' as-path [ %s ]' % aspath
-                print(line)
+                line = ''
+                if alwaysup or (sgroup in service_groups and service_groups[sgroup] >= check_rise):
+                    line = 'neighbor %s announce route %s next-hop %s' % (name, address, nexthop)
+                    if weight > 0:
+                        line += ' med %d' % weight
+                    community = str(options.get('community', ''))
+                    if community != '':
+                        line += ' community [ %s ]' % community
+                    aspath = str(options.get('aspath', ''))
+                    if aspath != '':
+                        line += ' as-path [ %s ]' % aspath
+                elif sgroup in service_groups and service_groups[sgroup] <= (check_rise - check_fall):
+                    line = 'neighbor %s withdraw route %s' % (name, address)
+                if line != '':
+                    print(line)
             for address in addresses['withdraw'].iterkeys():
                 if not address in addresses['announce']:
-                    line = 'neighbor %s withdraw route %s next-hop %s' % (name, address, peer.get('local', {}).get('nexthop6' if inet6(address) else 'nexthop', 'self'))
+                    line = 'neighbor %s withdraw route %s' % (name, address)
                     print(line)
             sys.stdout.flush()
 
